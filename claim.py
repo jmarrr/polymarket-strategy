@@ -47,14 +47,15 @@ async def get_redeemable_positions(data_client, user_address: str) -> list:
         return []
 
 
-async def redeem_position(web3_client, position: dict) -> bool:
+async def redeem_position(web3_client, position) -> bool:
     """Redeem a single position."""
     try:
-        condition_id = position.get("conditionId")
-        size = int(float(position.get("size", 0)))
-        outcome_index = position.get("outcomeIndex", 0)
-        neg_risk = position.get("negativeRisk", False)
-        title = position.get("title", "Unknown")[:40]
+        # Position is a Pydantic model, access as attributes
+        condition_id = getattr(position, "conditionId", None) or getattr(position, "condition_id", None)
+        size = int(float(getattr(position, "size", 0)))
+        outcome_index = getattr(position, "outcomeIndex", 0) or getattr(position, "outcome_index", 0)
+        neg_risk = getattr(position, "negativeRisk", False) or getattr(position, "negative_risk", False)
+        title = str(getattr(position, "title", "Unknown"))[:40]
 
         if size <= 0:
             return False
@@ -126,7 +127,7 @@ async def main():
     total_value = 0.0
 
     for pos in positions:
-        value = float(pos.get("currentValue", 0))
+        value = float(getattr(pos, "currentValue", 0) or getattr(pos, "current_value", 0) or 0)
         total_value += value
 
         if await redeem_position(web3_client, pos):
