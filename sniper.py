@@ -443,8 +443,8 @@ class SniperMonitor:
             f"{tag} "
             f"⏱️ {mins:02d}:{secs:02d} | "
             f"🎯 ${target:.2f} | "
-            f"UP: ${self.up_price:.2f} | "
-            f"DOWN: ${self.down_price:.2f} | "
+            f"UP: ${self.up_price:.2f} ({int(self.up_size)}) | "
+            f"DOWN: ${self.down_price:.2f} ({int(self.down_size)}) | "
         )
 
         # Sanity check: stale snapshots show both sides ~$0.99 (sum ~$1.98)
@@ -491,7 +491,7 @@ class SniperMonitor:
                             success = execute_snipe(opportunity, target_price=target, monitor_label=self.asset_label)
                             if success:
                                 self.snipe_executed = True
-                                status = f"[{self.asset_label}]".ljust(12) + f"⏱️ {mins:02d}:{secs:02d} | 🎯 ${target:.2f} | UP: ${self.up_price:.2f} | DOWN: ${self.down_price:.2f} | ✅ SNIPED!"
+                                status = f"[{self.asset_label}]".ljust(12) + f"⏱️ {mins:02d}:{secs:02d} | 🎯 ${target:.2f} | UP: ${self.up_price:.2f} ({int(self.up_size)}) | DOWN: ${self.down_price:.2f} ({int(self.down_size)}) | ✅ SNIPED!"
                                 _update_asset_status(self.asset_label, status)
                     else:
                         _update_asset_status(self.asset_label, f"[{self.asset_label}]".ljust(12) + "| ⚠️ Trading disabled")
