@@ -439,22 +439,12 @@ class SniperMonitor:
         # Build status line (pad tag to align columns)
         tag = f"[{self.asset_label}]" if self.asset_label else ""
         tag = tag.ljust(10)
-
-        # Show size only for the side that hits target (to debug liquidity issues)
-        up_info = f"${self.up_price:.2f}"
-        down_info = f"${self.down_price:.2f}"
-        epsilon = 0.005
-        if self.up_price >= (target - epsilon):
-            up_info += f"({int(self.up_size)})"
-        if self.down_price >= (target - epsilon):
-            down_info += f"({int(self.down_size)})"
-
         status = (
             f"{tag} "
             f"⏱️ {mins:02d}:{secs:02d} | "
             f"🎯 ${target:.2f} | "
-            f"UP: {up_info} | "
-            f"DOWN: {down_info} | "
+            f"UP: ${self.up_price:.2f} | "
+            f"DOWN: ${self.down_price:.2f} | "
         )
 
         # Sanity check: stale snapshots show both sides ~$0.99 (sum ~$1.98)
