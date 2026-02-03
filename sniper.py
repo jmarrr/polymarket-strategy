@@ -12,8 +12,10 @@ Uses WebSocket for real-time order book updates.
 import os
 import json
 import time
+import logging
 import requests
 import threading
+from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from websocket import WebSocketApp
@@ -55,6 +57,62 @@ _asset_order = []   # ordered list of labels for consistent display
 _connected_count = 0
 _expected_connections = len(MONITORED_ASSETS)
 _all_connected = False
+
+# Position tracking
+_positions = {}  # {asset: {"side": str, "size": int, "price": float, "cost": float}}
+_total_exposure = 0.0
+MAX_TOTAL_EXPOSURE = 200  # Maximum total USDC across all positions
+
+# Trade logger
+_trade_logger = None
+
+
+def _setup_trade_logger():
+    """Setup file logger for trades."""
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+
+    logger = logging.getLogger("trades")
+    logger.setLevel(logging.INFO)
+
+    # Avoid duplicate handlers
+    if not logger.handlers:
+        handler = logging.FileHandler(log_dir / "trades.log")
+        handler.setFormatter(logging.Formatter(
+            '%(asctime)s | %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        ))
+        logger.addHandler(handler)
+    return logger
+
+
+def log_trade(asset: str, side: str, price: float, size: int, success: bool, order_id: str = ""):
+    """Log a trade to file."""
+    global _trade_logger
+    if _trade_logger is None:
+        _trade_logger = _setup_trade_logger()
+
+    status = "SUCCESS" if success else "FAILED"
+    cost = size * price
+    _trade_logger.info(f"{status} | {asset} | {side} | ${price:.4f} | {size} shares | ${cost:.2f} | {order_id}")
+
+
+def can_open_position(cost: float) -> bool:
+    """Check if we can open a position without exceeding max exposure."""
+    return (_total_exposure + cost) <= MAX_TOTAL_EXPOSURE
+
+
+def record_position(asset: str, side: str, size: int, price: float):
+    """Record a new position."""
+    global _total_exposure
+    cost = size * price
+    _positions[asset] = {"side": side, "size": size, "price": price, "cost": cost}
+    _total_exposure += cost
+
+
+def get_total_exposure() -> float:
+    """Get current total exposure across all positions."""
+    return _total_exposure
 
 
 def _refresh_status():
@@ -113,6 +171,17 @@ def get_trading_client():
     return _trading_client
 
 
+# Read-only client for order book queries (no API creds needed)
+_read_client = None
+
+def get_read_client():
+    """Get or create a read-only client for order book queries."""
+    global _read_client
+    if _read_client is None:
+        _read_client = ClobClient(CLOB_HOST, chain_id=POLYGON)
+    return _read_client
+
+
 def get_current_et_time():
     """Get current time in Eastern Time."""
     try:
@@ -132,39 +201,10 @@ def get_15m_interval_timestamp() -> int:
     return int(interval_time.timestamp())
 
 
-def get_current_interval_end_time():
-    """Get the end time of the current 15-minute interval."""
-    et_now = get_current_et_time()
-    minute = (et_now.minute // 15) * 15
-    interval_start = et_now.replace(minute=minute, second=0, microsecond=0)
-    interval_end = interval_start + timedelta(minutes=15)
-    return interval_end
-
-
-def get_minutes_remaining() -> float:
-    """Get minutes remaining until current interval ends."""
-    et_now = get_current_et_time()
-    interval_end = get_current_interval_end_time()
-    remaining = (interval_end - et_now).total_seconds() / 60
-    return max(0, remaining)
-
-
 def generate_market_slug(base: str = "bitcoin") -> str:
     """Generate market slug for current 15-minute interval."""
     base_short = {"bitcoin": "btc", "ethereum": "eth", "solana": "sol", "xrp": "xrp"}.get(base, base)
     timestamp = get_15m_interval_timestamp()
-    return f"{base_short}-updown-15m-{timestamp}"
-
-
-def generate_next_slug(base: str = "bitcoin") -> str:
-    """Generate market slug for the next 15-minute interval."""
-    et_now = get_current_et_time()
-    current_minute = (et_now.minute // 15) * 15
-    current_interval = et_now.replace(minute=current_minute, second=0, microsecond=0)
-    next_time = current_interval + timedelta(minutes=15)
-    
-    base_short = {"bitcoin": "btc", "ethereum": "eth", "solana": "sol", "xrp": "xrp"}.get(base, base)
-    timestamp = int(next_time.timestamp())
     return f"{base_short}-updown-15m-{timestamp}"
 
 
@@ -205,7 +245,7 @@ def fetch_market_by_slug(slug: str) -> dict | None:
 def get_order_book(token_id: str) -> dict | None:
     """Fetch order book for a token via REST API."""
     try:
-        client = ClobClient(CLOB_HOST, chain_id=POLYGON)
+        client = get_read_client()
         book = client.get_order_book(token_id)
         
         # Handle OrderBookSummary object - convert to dict format
@@ -531,7 +571,7 @@ class SniperMonitor:
         def sync_loop():
             while self.running:
                 try:
-                    time.sleep(5)
+                    time.sleep(3)
                     if not self.running:
                         break
                     # Fetch both books first, then apply atomically
@@ -567,7 +607,13 @@ class SniperMonitor:
             if self.stopped:
                 break
 
-            retry_count += 1
+            # Only count as retry if connection failed (running was never set to True)
+            # If it ran successfully for a while then disconnected, reset the counter
+            if not self.running:
+                retry_count += 1
+            else:
+                retry_count = 0  # Reset on successful connection that later dropped
+
             if retry_count > max_retries:
                 _print_event(f"❌ [{self.asset_label}] Max reconnect attempts ({max_retries}) reached")
                 break
@@ -575,10 +621,6 @@ class SniperMonitor:
             wait = min(2 ** retry_count, 30)
             _print_event(f"🔄 [{self.asset_label}] Reconnecting in {wait}s (attempt {retry_count}/{max_retries})...")
             time.sleep(wait)
-
-        # Reset retry count on successful connection
-        if self.running:
-            retry_count = 0
     
     def stop(self):
         """Stop the WebSocket connection permanently (no reconnect)."""
@@ -586,87 +628,6 @@ class SniperMonitor:
         self.running = False
         if self.ws:
             self.ws.close()
-
-
-def analyze_btc_market(market: dict) -> dict | None:
-    """
-    Analyze BTC 15m market for snipe opportunity (REST API fallback).
-    
-    Returns opportunity dict if price is in range, None otherwise.
-    """
-    try:
-        question = market.get("question", "")
-        outcomes = json.loads(market.get("outcomes", "[]"))
-        token_ids = json.loads(market.get("clobTokenIds", "[]"))
-        
-        if len(token_ids) != 2 or len(outcomes) != 2:
-            return None
-        
-        # Determine UP/DOWN indices
-        outcome_0_lower = outcomes[0].lower() if outcomes else ""
-        up_idx = 0 if outcome_0_lower in ["yes", "up"] else 1
-        down_idx = 1 if up_idx == 0 else 0
-        
-        up_token = token_ids[up_idx]
-        down_token = token_ids[down_idx]
-        
-        # Get order books for both sides
-        up_book = get_order_book(up_token)
-        down_book = get_order_book(down_token)
-        
-        if not up_book or not down_book:
-            return None
-        
-        up_asks = up_book.get("asks", [])
-        down_asks = down_book.get("asks", [])
-        
-        if not up_asks or not down_asks:
-            return None
-        
-        up_price = float(up_asks[0].get("price", 0))
-        up_size = float(up_asks[0].get("size", 0))
-        down_price = float(down_asks[0].get("price", 0))
-        down_size = float(down_asks[0].get("size", 0))
-        
-        # Check if either side is in snipe range
-        opportunities = []
-        
-        if up_price >= TARGET_PRICE and up_size > 0:
-            opportunities.append({
-                "side": "UP",
-                "outcome": outcomes[up_idx],
-                "token_id": up_token,
-                "price": up_price,
-                "size": up_size,
-                "profit_per_share": 1.0 - up_price,
-                "roi_percent": ((1.0 - up_price) / up_price) * 100,
-            })
-        
-        if down_price >= TARGET_PRICE and down_size > 0:
-            opportunities.append({
-                "side": "DOWN",
-                "outcome": outcomes[down_idx],
-                "token_id": down_token,
-                "price": down_price,
-                "size": down_size,
-                "profit_per_share": 1.0 - down_price,
-                "roi_percent": ((1.0 - down_price) / down_price) * 100,
-            })
-        
-        if not opportunities:
-            return None
-        
-        # Return the best opportunity (highest price = highest conviction)
-        best = max(opportunities, key=lambda x: x["price"])
-        best["question"] = question
-        best["up_price"] = up_price
-        best["down_price"] = down_price
-        
-        return best
-        
-    except Exception as e:
-        print(f"❌ Error analyzing market: {e}")
-        return None
 
 
 def execute_snipe(opportunity: dict, size: int = None) -> bool:
@@ -701,9 +662,11 @@ def execute_snipe(opportunity: dict, size: int = None) -> bool:
 
         # Verify REST price also meets target (don't trust WebSocket alone)
         if best_ask_price < TARGET_PRICE:
+            _print_event(f"⚠️ REST price ${best_ask_price:.2f} < target ${TARGET_PRICE:.2f}, skipping")
             return False
 
         price = round(best_ask_price, 2)
+        asset_label = opportunity.get("side", "UNKNOWN")
 
         # Calculate position size
         if size is None:
@@ -723,6 +686,12 @@ def execute_snipe(opportunity: dict, size: int = None) -> bool:
             _print_event("⚠️  Insufficient liquidity")
             return False
 
+        # Check position limit
+        cost = size * price
+        if not can_open_position(cost):
+            _print_event(f"⚠️ Would exceed max exposure (${_total_exposure:.2f} + ${cost:.2f} > ${MAX_TOTAL_EXPOSURE})")
+            return False
+
         # Create and execute order
         order = OrderArgs(
             price=price,
@@ -736,6 +705,15 @@ def execute_snipe(opportunity: dict, size: int = None) -> bool:
             result = client.post_order(signed_order, OrderType.FOK)
 
         success = result.get("success", False)
+        order_id = result.get("orderID", "")
+
+        # Log the trade
+        log_trade(asset_label, opportunity["side"], price, size, success, order_id)
+
+        # Record position if successful
+        if success:
+            record_position(asset_label, opportunity["side"], size, price)
+
         return success
 
     except Exception as e:
@@ -751,7 +729,6 @@ def monitor_asset(asset: str):
 
     while True:
         try:
-            minutes_left = get_minutes_remaining()
             slug = generate_market_slug(asset)
 
             # Check if we moved to a new interval
@@ -762,6 +739,10 @@ def monitor_asset(asset: str):
                     time.sleep(1)
 
                 current_slug = slug
+                # Calculate minutes remaining from slug timestamp
+                slug_timestamp = int(slug.split("-")[-1])
+                interval_end_unix = slug_timestamp + 900
+                minutes_left = max(0, (interval_end_unix - int(time.time())) / 60)
                 _print_event(f"[{label}] New interval: {slug} | Closes in {minutes_left:.1f}min")
 
                 # Fetch market data
