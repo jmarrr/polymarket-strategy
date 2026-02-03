@@ -480,6 +480,9 @@ class SniperMonitor:
                                 with _trade_lock:
                                     self.snipe_executed = True
                                 status += "✅ SNIPED!"
+                                # Print permanent log line (won't be overwritten by status refresh)
+                                with _print_lock:
+                                    print(f"\n🎉 SNIPED {self.asset_label} {opportunity['side']} @ ${opportunity['price']:.2f}\n")
                         finally:
                             self._attempting_snipe = False
                         _update_asset_status(self.asset_label, status)
