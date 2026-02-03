@@ -4,14 +4,13 @@
 Collection of trading bots and tools for Polymarket prediction markets, primarily focused on crypto 15-minute resolution markets.
 
 ## Key Files
+
+### Proven Working
 - `sniper.py` — Multi-asset 15m resolution sniper (BTC, ETH, SOL, XRP). WebSocket-based, monitors order books and buys when price hits target.
 - `claim.py` — Auto-claim script for redeeming winning positions (uses `polymarket-apis` package)
-- `arb.py` — Arbitrage bot
-- `lp.py` — Liquidity provision bot
-- `esport_sniper.py` — Esports market sniper
-- `market_watcher.py` — Market monitoring tool
-- `audio_agent.py` / `audio_monitor.py` — Audio-based monitoring tools
-- `export_polymarket_activity.py` — Activity export utility
+
+### Currently Testing
+- `overreaction.py` — Overreaction strategy (experimental)
 
 ## Deployment Files
 - `DEPLOYMENT.md` — Step-by-step Hetzner Cloud setup guide
