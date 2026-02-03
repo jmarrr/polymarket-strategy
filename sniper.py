@@ -37,7 +37,22 @@ FUNDER = os.getenv("FUNDER_ADDRESS")
 
 # Strategy Configuration
 MONITORED_ASSETS = ["bitcoin", "ethereum", "solana", "xrp"]
-TARGET_PRICE = 0.98  # Buy when price hits this or higher
+
+# Time-based target price tiers (seconds_threshold, target_price)
+# More aggressive as time runs out
+PRICE_TIERS = [
+    (30, 0.85),   # <= 30s: $0.85 (aggressive)
+    (60, 0.92),   # <= 60s: $0.92 (medium)
+    (float('inf'), 0.98),  # > 60s: $0.98 (conservative)
+]
+
+
+def get_target_price(seconds_remaining: int) -> float:
+    """Get target price based on time remaining until resolution."""
+    for threshold, price in PRICE_TIERS:
+        if seconds_remaining <= threshold:
+            return price
+    return 0.98  # Fallback
 
 # Trading Configuration
 EXECUTE_TRADES = True  # Set to True to enable actual trading
@@ -146,18 +161,6 @@ def _update_asset_status(label: str, status: str):
         else:
             _asset_status[label] = status
             _refresh_status()
-
-
-def _print_event(msg: str):
-    """Print an event message (trade, error, etc.) without disrupting status lines."""
-    if not _all_connected:
-        return
-    with _print_lock:
-        # Move below status lines, print message, then redraw status
-        print(f"\r\033[K{msg}", flush=True)
-        # Re-reserve status lines
-        for label in _asset_order:
-            print(_asset_status.get(label, ""), flush=True)
 
 
 def get_trading_client():
@@ -426,12 +429,16 @@ class SniperMonitor:
         mins = total_secs // 60
         secs = total_secs % 60
 
+        # Get dynamic target price based on time remaining
+        target = get_target_price(total_secs)
+
         # Build status line (pad tag to align columns)
         tag = f"[{self.asset_label}]" if self.asset_label else ""
         tag = tag.ljust(10)
         status = (
             f"{tag} "
             f"⏱️ {mins:02d}:{secs:02d} | "
+            f"🎯 ${target:.2f} | "
             f"UP: ${self.up_price:.2f} | "
             f"DOWN: ${self.down_price:.2f} | "
         )
@@ -448,7 +455,7 @@ class SniperMonitor:
             elif not prices_valid:
                 status += f"⚠️ Stale (sum=${price_sum:.2f})"
             else:
-                opportunity = self.get_best_opportunity()
+                opportunity = self.get_best_opportunity(target)
 
                 if opportunity:
                     status += f"🎯 {opportunity['side']} @ ${opportunity['price']:.2f}"
@@ -460,32 +467,38 @@ class SniperMonitor:
                             if self.snipe_executed:
                                 return
                             self.snipe_executed = True
-                        success = execute_snipe(opportunity)
-                        if not success:
+                        success = execute_snipe(opportunity, target_price=target, monitor_label=self.asset_label)
+                        if success:
+                            # Immediately show SNIPED status
+                            sniped_status = f"[{self.asset_label}]".ljust(12) + f"⏱ {self.countdown_display} | 🎯 ${target:.2f} | UP: ${self.up_price:.2f} | DOWN: ${self.down_price:.2f} | ✅ SNIPED!"
+                            _update_asset_status(self.asset_label, sniped_status)
+                        else:
                             self.snipe_executed = False
                     elif EXECUTE_TRADES:
                         confirm = input("\n   Execute snipe? (y/n): ").strip().lower()
                         if confirm == "y":
-                            success = execute_snipe(opportunity)
+                            success = execute_snipe(opportunity, target_price=target, monitor_label=self.asset_label)
                             if success:
                                 self.snipe_executed = True
+                                sniped_status = f"[{self.asset_label}]".ljust(12) + f"⏱ {self.countdown_display} | 🎯 ${target:.2f} | UP: ${self.up_price:.2f} | DOWN: ${self.down_price:.2f} | ✅ SNIPED!"
+                                _update_asset_status(self.asset_label, sniped_status)
                     else:
-                        _print_event(f"   ⚠️  Trading disabled. Set EXECUTE_TRADES = True")
+                        _update_asset_status(self.asset_label, f"[{self.asset_label}]".ljust(12) + "| ⚠️ Trading disabled")
                         self.snipe_executed = True
 
                     return
                 else:
                     status += "Waiting for target price"
         elif self.snipe_executed:
-            status += "✅ SNIPED"
+            status += "✅ SNIPED!"
 
         _update_asset_status(self.asset_label, status)
     
-    def get_best_opportunity(self) -> dict | None:
+    def get_best_opportunity(self, target_price: float) -> dict | None:
         """Get best snipe opportunity if price in range."""
         opportunities = []
-        
-        if self.up_price >= TARGET_PRICE and self.up_size > 0:
+
+        if self.up_price >= target_price and self.up_size > 0:
             opportunities.append({
                 "side": "UP",
                 "outcome": self.outcomes[self.up_idx],
@@ -495,8 +508,8 @@ class SniperMonitor:
                 "profit_per_share": 1.0 - self.up_price,
                 "roi_percent": ((1.0 - self.up_price) / self.up_price) * 100,
             })
-        
-        if self.down_price >= TARGET_PRICE and self.down_size > 0:
+
+        if self.down_price >= target_price and self.down_size > 0:
             opportunities.append({
                 "side": "DOWN",
                 "outcome": self.outcomes[self.down_idx],
@@ -514,11 +527,11 @@ class SniperMonitor:
     
     def on_error(self, ws, error):
         """Handle WebSocket errors."""
-        _print_event(f"❌ [{self.asset_label}] WebSocket error: {error}")
+        _update_asset_status(self.asset_label, f"[{self.asset_label}]".ljust(12) + f"| ❌ WebSocket error: {str(error)[:30]}")
 
     def on_close(self, ws, close_status_code, close_msg):
         """Handle WebSocket close."""
-        _print_event(f"🔌 [{self.asset_label}] WebSocket closed (code={close_status_code})")
+        _update_asset_status(self.asset_label, f"[{self.asset_label}]".ljust(12) + f"| 🔌 WebSocket closed (code={close_status_code})")
         self.running = False
 
     def on_open(self, ws):
@@ -601,7 +614,7 @@ class SniperMonitor:
                 on_open=self.on_open
             )
 
-            _print_event(f"🔌 [{self.asset_label}] Connecting to WebSocket...")
+            _update_asset_status(self.asset_label, f"[{self.asset_label}]".ljust(12) + "| 🔌 Connecting to WebSocket...")
             self.ws.run_forever(ping_interval=30, ping_timeout=10)
 
             if self.stopped:
@@ -615,11 +628,11 @@ class SniperMonitor:
                 retry_count = 0  # Reset on successful connection that later dropped
 
             if retry_count > max_retries:
-                _print_event(f"❌ [{self.asset_label}] Max reconnect attempts ({max_retries}) reached")
+                _update_asset_status(self.asset_label, f"[{self.asset_label}]".ljust(12) + f"| ❌ Max reconnect attempts reached")
                 break
 
             wait = min(2 ** retry_count, 30)
-            _print_event(f"🔄 [{self.asset_label}] Reconnecting in {wait}s (attempt {retry_count}/{max_retries})...")
+            _update_asset_status(self.asset_label, f"[{self.asset_label}]".ljust(12) + f"| 🔄 Reconnecting in {wait}s...")
             time.sleep(wait)
     
     def stop(self):
@@ -630,10 +643,11 @@ class SniperMonitor:
             self.ws.close()
 
 
-def execute_snipe(opportunity: dict, size: int = None) -> bool:
+def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.98, monitor_label: str = None) -> bool:
     """Execute snipe trade."""
     if not EXECUTE_TRADES:
-        _print_event("⚠️  Trading disabled (EXECUTE_TRADES = False)")
+        if monitor_label:
+            _update_asset_status(monitor_label, f"[{monitor_label}]".ljust(12) + "| ⚠️ Trading disabled")
         return False
 
     try:
@@ -644,12 +658,14 @@ def execute_snipe(opportunity: dict, size: int = None) -> bool:
         order_book = get_order_book(token_id)
 
         if not order_book:
-            _print_event("⚠️  Cannot execute snipe: orderbook unavailable")
+            if monitor_label:
+                _update_asset_status(monitor_label, f"[{monitor_label}]".ljust(12) + "| ⚠️ Orderbook unavailable")
             return False
 
         asks = order_book.get("asks", [])
         if not asks:
-            _print_event("⚠️  Cannot execute snipe: no asks in orderbook")
+            if monitor_label:
+                _update_asset_status(monitor_label, f"[{monitor_label}]".ljust(12) + "| ⚠️ No asks in orderbook")
             return False
 
         # Verify there's liquidity at a reasonable price
@@ -657,16 +673,17 @@ def execute_snipe(opportunity: dict, size: int = None) -> bool:
         best_ask_size = float(asks[0].get("size", 0))
 
         if best_ask_size <= 0:
-            _print_event("⚠️  Cannot execute snipe: no liquidity at best ask")
+            if monitor_label:
+                _update_asset_status(monitor_label, f"[{monitor_label}]".ljust(12) + "| ⚠️ No liquidity at best ask")
             return False
 
         # Verify REST price also meets target (don't trust WebSocket alone)
-        if best_ask_price < TARGET_PRICE:
-            _print_event(f"⚠️ REST price ${best_ask_price:.2f} < target ${TARGET_PRICE:.2f}, skipping")
+        if best_ask_price < target_price:
+            if monitor_label:
+                _update_asset_status(monitor_label, f"[{monitor_label}]".ljust(12) + f"| ⚠️ REST ${best_ask_price:.2f} < target ${target_price:.2f}")
             return False
 
         price = round(best_ask_price, 2)
-        asset_label = opportunity.get("side", "UNKNOWN")
 
         # Calculate position size
         if size is None:
@@ -683,13 +700,15 @@ def execute_snipe(opportunity: dict, size: int = None) -> bool:
             size = available
 
         if size < 1:
-            _print_event("⚠️  Insufficient liquidity")
+            if monitor_label:
+                _update_asset_status(monitor_label, f"[{monitor_label}]".ljust(12) + "| ⚠️ Insufficient liquidity")
             return False
 
         # Check position limit
         cost = size * price
         if not can_open_position(cost):
-            _print_event(f"⚠️ Would exceed max exposure (${_total_exposure:.2f} + ${cost:.2f} > ${MAX_TOTAL_EXPOSURE})")
+            if monitor_label:
+                _update_asset_status(monitor_label, f"[{monitor_label}]".ljust(12) + f"| ⚠️ Max exposure reached")
             return False
 
         # Create and execute order
@@ -708,16 +727,17 @@ def execute_snipe(opportunity: dict, size: int = None) -> bool:
         order_id = result.get("orderID", "")
 
         # Log the trade
-        log_trade(asset_label, opportunity["side"], price, size, success, order_id)
+        log_trade(monitor_label or "UNKNOWN", opportunity["side"], price, size, success, order_id)
 
         # Record position if successful
         if success:
-            record_position(asset_label, opportunity["side"], size, price)
+            record_position(monitor_label or "UNKNOWN", opportunity["side"], size, price)
 
         return success
 
     except Exception as e:
-        _print_event(f"   ❌ Error executing snipe: {e}")
+        if monitor_label:
+            _update_asset_status(monitor_label, f"[{monitor_label}]".ljust(12) + f"| ❌ Error: {str(e)[:30]}")
         return False
 
 
@@ -743,20 +763,20 @@ def monitor_asset(asset: str):
                 slug_timestamp = int(slug.split("-")[-1])
                 interval_end_unix = slug_timestamp + 900
                 minutes_left = max(0, (interval_end_unix - int(time.time())) / 60)
-                _print_event(f"[{label}] New interval: {slug} | Closes in {minutes_left:.1f}min")
+                _update_asset_status(label, f"[{label}]".ljust(12) + f"| 🆕 New interval | Closes in {minutes_left:.1f}min")
 
                 # Fetch market data
                 event_data = fetch_market_by_slug(slug)
 
                 if not event_data:
-                    _print_event(f"[{label}] Waiting for market {slug}...")
+                    _update_asset_status(label, f"[{label}]".ljust(12) + "| ⏳ Waiting for market...")
                     time.sleep(5)
                     current_slug = None  # Reset to retry
                     continue
 
                 markets = event_data.get("markets", [])
                 if not markets:
-                    _print_event(f"[{label}] No markets in event...")
+                    _update_asset_status(label, f"[{label}]".ljust(12) + "| ⏳ No markets in event...")
                     time.sleep(5)
                     current_slug = None
                     continue
@@ -764,13 +784,13 @@ def monitor_asset(asset: str):
                 # Get open market
                 open_markets = [m for m in markets if not m.get('closed', False)]
                 if not open_markets:
-                    _print_event(f"[{label}] Market closed, waiting for next...")
+                    _update_asset_status(label, f"[{label}]".ljust(12) + "| ⏳ Market closed, waiting...")
                     time.sleep(5)
                     current_slug = None
                     continue
 
                 market = open_markets[0]
-                _print_event(f"[{label}] Found: {market.get('question', '')[:60]}...")
+                _update_asset_status(label, f"[{label}]".ljust(12) + f"| ✅ Found market, connecting...")
 
                 # Extract end time from slug timestamp (start + 15min)
                 slug_timestamp = int(slug.split("-")[-1])
@@ -785,7 +805,7 @@ def monitor_asset(asset: str):
                 while ws_thread.is_alive():
                     new_slug = generate_market_slug(asset)
                     if new_slug != current_slug:
-                        _print_event(f"[{label}] Interval ended, switching...")
+                        _update_asset_status(label, f"[{label}]".ljust(12) + "| 🔄 Interval ended, switching...")
                         monitor.stop()
                         break
                     time.sleep(1)
@@ -793,7 +813,7 @@ def monitor_asset(asset: str):
                 time.sleep(5)
 
         except Exception as e:
-            _print_event(f"[{label}] Error: {e}")
+            _update_asset_status(label, f"[{label}]".ljust(12) + f"| ❌ Error: {str(e)[:30]}")
             time.sleep(5)
 
 
@@ -804,7 +824,7 @@ def monitor_all_assets():
     print(f"🎯 MULTI-ASSET 15M RESOLUTION SNIPER (WebSocket)")
     print(f"{'='*70}")
     print(f"   Assets: {', '.join(a.upper() for a in MONITORED_ASSETS)}")
-    print(f"   Target price: ${TARGET_PRICE:.2f}+")
+    print(f"   Target prices: ${PRICE_TIERS[-1][1]:.2f} (>60s) → ${PRICE_TIERS[1][1]:.2f} (30-60s) → ${PRICE_TIERS[0][1]:.2f} (<30s)")
     print(f"\n   💰 Trading: {'ENABLED' if EXECUTE_TRADES else 'DISABLED'}")
     if EXECUTE_TRADES:
         print(f"   📊 Max position: ${MAX_POSITION_SIZE} per trade")

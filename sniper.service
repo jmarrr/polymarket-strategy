@@ -1,0 +1,19 @@
+[Unit]
+Description=Polymarket Sniper Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/polymarket-strategy
+Environment=PATH=/root/polymarket-strategy/venv/bin
+ExecStart=/root/polymarket-strategy/venv/bin/python sniper.py
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
