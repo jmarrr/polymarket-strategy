@@ -469,8 +469,8 @@ class SniperMonitor:
             f"{tag} "
             f"⏱️ {mins:02d}:{secs:02d} | "
             f"🎯 ${target:.2f} | "
-            f"UP: ${self.up_price:.2f} ({int(self.up_size)}) | "
-            f"DOWN: ${self.down_price:.2f} ({int(self.down_size)}) | "
+            f"UP: ${self.up_price:.2f} | "
+            f"DOWN: ${self.down_price:.2f} | "
         )
 
         # Sanity check: stale snapshots show both sides ~$0.99 (sum ~$1.98)
