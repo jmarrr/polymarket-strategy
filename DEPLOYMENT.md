@@ -1,16 +1,16 @@
-# Deploying Polymarket Sniper to Hetzner Cloud
+# Deploying Polymarket Sniper to DigitalOcean
 
-## Step 1: Create Hetzner Account & Server
+## Step 1: Create DigitalOcean Account & Droplet
 
-1. Go to https://www.hetzner.com/cloud
+1. Go to https://www.digitalocean.com
 2. Create account, verify email, add payment method
-3. Create new project → "Add Server"
+3. Click "Create" → "Droplets"
 4. Configure:
-   - **Location**: Ashburn, VA (closest to Polymarket)
+   - **Region**: New York (NYC1/NYC3) — closest to Polymarket
    - **Image**: Ubuntu 24.04
-   - **Type**: CX22 (€3.29/mo) — 2 vCPU, 4GB RAM
-   - **SSH Key**: Add your public key (or use password)
-5. Click "Create & Buy Now"
+   - **Size**: Basic → Regular → $4/mo (1 vCPU, 512MB RAM) or $6/mo (1GB RAM)
+   - **Authentication**: SSH Key (recommended) or Password
+5. Click "Create Droplet"
 6. Note the IP address
 
 ## Step 2: Connect to Server
@@ -165,7 +165,17 @@ crontab -l
 
 ### Firewall issues
 ```bash
-# Hetzner firewall is off by default, but if needed:
+# DigitalOcean firewall is managed via dashboard, but if using ufw:
 ufw allow ssh
 ufw enable
+```
+
+### Out of memory (512MB droplet)
+```bash
+# Add swap space
+fallocate -l 1G /swapfile
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
 ```

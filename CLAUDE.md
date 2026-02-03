@@ -13,7 +13,7 @@ Collection of trading bots and tools for Polymarket prediction markets, primaril
 - `overreaction.py` — Overreaction strategy (experimental)
 
 ## Deployment Files
-- `DEPLOYMENT.md` — Step-by-step Hetzner Cloud setup guide
+- `DEPLOYMENT.md` — Step-by-step DigitalOcean setup guide
 - `setup.sh` — One-command server setup script
 - `sniper.service` — systemd service for auto-restart
 - `requirements.txt` — Python dependencies for sniper
