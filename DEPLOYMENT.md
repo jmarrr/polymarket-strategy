@@ -8,7 +8,7 @@
 4. Configure:
    - **Region**: New York (NYC1/NYC3) — closest to Polymarket
    - **Image**: Ubuntu 24.04
-   - **Size**: Basic → Regular → $4/mo (1 vCPU, 512MB RAM) or $6/mo (1GB RAM)
+   - **Size**: Basic → Regular → $6/mo (1GB RAM recommended)
    - **Authentication**: SSH Key (recommended) or Password
 5. Click "Create Droplet"
 6. Note the IP address
@@ -19,163 +19,176 @@
 ssh root@YOUR_SERVER_IP
 ```
 
-## Step 3: Run Setup Script
-
-```bash
-# Download and run setup
-curl -sSL https://raw.githubusercontent.com/jmarrr/polymarket-strategy/master/setup.sh | bash
-```
-
-Or manually:
+## Step 3: Install Dependencies
 
 ```bash
 # Update system
 apt update && apt upgrade -y
 
-# Install Python 3.12+ (required for claim script)
-apt install -y software-properties-common
-add-apt-repository -y ppa:deadsnakes/ppa
-apt update
-apt install -y python3.12 python3.12-venv python3-pip git
+# Install required packages
+apt install -y python3 python3-pip python3-venv git tmux
 
 # Clone repository
-git clone https://github.com/jmarrr/polymarket-strategy.git
-cd polymarket-strategy
+git clone https://github.com/YOUR_REPO/polymarket.git
+cd polymarket
 
-# Create virtual environment for sniper
+# Create virtual environment
 python3 -m venv venv
 source venv/bin/activate
+
+# Install Python dependencies
 pip install -r requirements.txt
 ```
 
 ## Step 4: Configure Environment
 
 ```bash
-cd ~/polymarket-strategy
+cd ~/polymarket
 
 # Create .env file
-cat > .env << 'EOF'
+nano .env
+```
+
+Add your credentials:
+```
 PRIVATE_KEY=your_private_key_here
 FUNDER_ADDRESS=your_funder_address_here
-EOF
+```
 
-# Secure the file
+Secure the file:
+```bash
 chmod 600 .env
 ```
 
-## Step 5: Test Run
+## Step 5: Open Firewall for Dashboard
+
+In DigitalOcean console:
+1. Go to **Networking** → **Firewalls**
+2. Click **Create Firewall**
+3. Add Inbound Rule:
+   - Type: **Custom**
+   - Protocol: **TCP**
+   - Port: **5000**
+   - Sources: **All IPv4** (or your IP for security)
+4. Apply firewall to your droplet
+
+## Step 6: Run with tmux
+
+tmux keeps processes running after you disconnect.
 
 ```bash
-cd ~/polymarket-strategy
+cd ~/polymarket
 source venv/bin/activate
+
+# Start tmux session
+tmux new -s sniper
+
+# Run sniper (dashboard starts automatically)
 python sniper.py
+
+# Detach: Ctrl+B, D
 ```
 
-Verify it connects and shows prices. Press Ctrl+C to stop.
+The dashboard is built into sniper.py - no separate process needed.
 
-## Step 6: Install as Service (Auto-restart)
+## Step 7: Access Dashboard
 
-```bash
-# Copy service file
-sudo cp sniper.service /etc/systemd/system/
-
-# Enable and start
-sudo systemctl daemon-reload
-sudo systemctl enable sniper
-sudo systemctl start sniper
-
-# Check status
-sudo systemctl status sniper
+Open in browser:
+```
+http://YOUR_SERVER_IP:5000
 ```
 
-## Step 7: Setup Auto-Claim (Optional but Recommended)
+You'll see:
+- Live asset prices (updates every 2 seconds)
+- Trade history
+- Error log
+- Current configuration
 
-The claim script redeems winning positions so capital can be recycled. Setup runs automatically via setup.sh, but to configure manually:
+## tmux Commands Reference
 
-```bash
-# Create separate venv for claim script (requires Python 3.12+)
-cd ~/polymarket-strategy
-python3.12 -m venv venv_claim
-source venv_claim/bin/activate
-pip install -r requirements_claim.txt
-deactivate
-
-# Test claim script
-~/polymarket-strategy/venv_claim/bin/python claim.py
-
-# Add cron job (runs every hour)
-crontab -e
-# Add this line:
-0 * * * * cd ~/polymarket-strategy && ~/polymarket-strategy/venv_claim/bin/python claim.py >> logs/claim.log 2>&1
-```
-
-## Step 8: Monitor
-
-```bash
-# View live sniper logs
-journalctl -u sniper -f
-
-# View trade log
-tail -f ~/polymarket-strategy/logs/trades.log
-
-# View claim log
-tail -f ~/polymarket-strategy/logs/claim.log
-
-# Restart service
-sudo systemctl restart sniper
-
-# Stop service
-sudo systemctl stop sniper
-```
+| Command | Action |
+|---------|--------|
+| `tmux new -s sniper` | Create new session |
+| `tmux attach -t sniper` | Reattach to session |
+| `Ctrl+B, D` | Detach (keep running) |
+| `Ctrl+B, C` | Create new window |
+| `Ctrl+B, N` | Next window |
+| `Ctrl+B, P` | Previous window |
+| `Ctrl+B, 0-9` | Jump to window number |
+| `Ctrl+B, W` | List all windows |
 
 ## Updating the Bot
 
 ```bash
-cd ~/polymarket-strategy
+tmux attach -t sniper
+
+# Stop with Ctrl+C, then:
+cd ~/polymarket
 git pull
-sudo systemctl restart sniper
+pip install -r requirements.txt
+
+# Restart
+python sniper.py
+```
+
+## Monitoring
+
+```bash
+# Reattach to see live output
+tmux attach -t sniper
+
+# View trade log
+tail -f ~/polymarket/logs/trades.log
+
+# Check dashboard from browser
+http://YOUR_SERVER_IP:5000
 ```
 
 ## Troubleshooting
 
-### Service won't start
+### Can't connect to dashboard
 ```bash
-journalctl -u sniper -n 50 --no-pager
+# Check sniper is running (dashboard is built-in)
+tmux attach -t sniper
+
+# Should see "Dashboard running at http://0.0.0.0:5000" in output
+# Check firewall allows port 5000 in DigitalOcean dashboard
 ```
 
-### Check if Python environment is correct
+### WebSocket disconnects
 ```bash
-source ~/polymarket-strategy/venv/bin/activate
+# Check sniper logs for reconnect messages
+tmux attach -t sniper
+# Switch to window 0: Ctrl+B, 0
+
+# Sniper auto-reconnects with exponential backoff
+```
+
+### Check Python environment
+```bash
+source ~/polymarket/venv/bin/activate
 python -c "import py_clob_client; print('OK')"
+python -c "import flask; print('OK')"
 ```
 
-### Claim script issues
+### Out of memory (add swap)
 ```bash
-# Check Python version (needs 3.12+)
-python3.12 --version
-
-# Test claim script manually
-cd ~/polymarket-strategy
-source venv_claim/bin/activate
-python claim.py
-
-# Check cron is running
-crontab -l
-```
-
-### Firewall issues
-```bash
-# DigitalOcean firewall is managed via dashboard, but if using ufw:
-ufw allow ssh
-ufw enable
-```
-
-### Out of memory (512MB droplet)
-```bash
-# Add swap space
 fallocate -l 1G /swapfile
 chmod 600 /swapfile
 mkswap /swapfile
 swapon /swapfile
 echo '/swapfile none swap sw 0 0' >> /etc/fstab
+```
+
+### Process died after disconnect
+Make sure you detached properly with `Ctrl+B, D` (not just closing terminal).
+
+To check if tmux session exists:
+```bash
+tmux ls
+```
+
+To reattach:
+```bash
+tmux attach -t sniper
 ```

@@ -431,6 +431,17 @@ class SniperMonitor:
                     "bids": event.get("bids", []),
                     "asks": event.get("asks", [])
                 }
+                # Check if we have both tokens and prices look valid
+                if self.up_token and self.down_token:
+                    up_book = self.orderbooks.get(self.up_token, {})
+                    down_book = self.orderbooks.get(self.down_token, {})
+                    up_asks = up_book.get("asks", [])
+                    down_asks = down_book.get("asks", [])
+                    if up_asks and down_asks:
+                        price_sum = float(up_asks[0]["price"]) + float(down_asks[0]["price"])
+                        # Trust snapshot if prices are valid (stale check still protects us)
+                        if price_sum <= 1.15:
+                            self.warmed_up = True
                 self.check_snipe_opportunity()
 
             elif event_type == "price_change" and asset_id:
@@ -910,8 +921,40 @@ def monitor_all_assets():
         print(f"{'='*70}")
 
 
+def start_dashboard_server(host='0.0.0.0', port=5000):
+    """Start the Flask dashboard server in a background thread."""
+    from flask import Flask, render_template, jsonify
+
+    app = Flask(__name__)
+
+    @app.route('/')
+    def index():
+        return render_template('dashboard.html')
+
+    @app.route('/api/status')
+    def api_status():
+        return jsonify(get_dashboard_data())
+
+    # Suppress Flask's request logging
+    import logging
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.ERROR)
+
+    print(f"\n🌐 Dashboard running at http://{host}:{port}\n")
+    app.run(host=host, port=port, debug=False, threaded=True, use_reloader=False)
+
+
 def main():
     """Main entry point."""
+    # Start dashboard server in background thread
+    dashboard_thread = threading.Thread(
+        target=start_dashboard_server,
+        kwargs={'host': '0.0.0.0', 'port': 5000},
+        daemon=True
+    )
+    dashboard_thread.start()
+
+    # Run the main monitoring loop
     monitor_all_assets()
 
 
