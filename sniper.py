@@ -10,6 +10,7 @@ Uses WebSocket for real-time order book updates.
 """
 
 import os
+import sys
 import json
 import time
 import logging
@@ -26,11 +27,14 @@ from py_clob_client.constants import POLYGON
 from py_clob_client.order_builder.constants import BUY
 from dotenv import load_dotenv
 
-# Rich for beautiful terminal display
+# Rich for beautiful terminal display (only used in interactive mode)
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
+
+# Detect if running in interactive terminal
+IS_INTERACTIVE = sys.stdout.isatty()
 
 load_dotenv()
 
@@ -82,6 +86,7 @@ _asset_order = []   # ordered list of labels for consistent display
 _connected_count = 0
 _expected_connections = len(MONITORED_ASSETS)
 _all_connected = False
+_last_print_time = 0  # For non-interactive periodic printing
 
 # Position tracking
 _positions = {}  # {asset: {"side": str, "size": int, "price": float, "cost": float}}
@@ -175,17 +180,36 @@ def _refresh_status():
             pass  # Ignore display errors
 
 
+def _print_all_status():
+    """Print all asset statuses (for non-interactive mode like journalctl)."""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"\n--- {timestamp} ---")
+    for label in _asset_order:
+        status = _asset_status.get(label, "")
+        # Strip any ANSI codes just in case
+        print(status)
+    sys.stdout.flush()
+
+
 def _update_asset_status(label: str, status: str):
     """Thread-safe update of an asset's status line."""
-    global _all_connected
+    global _all_connected, _last_print_time
     with _print_lock:
         if label not in _asset_order:
             _asset_order.append(label)
 
         _asset_status[label] = status
 
-        if _all_connected and _live is not None:
-            _refresh_status()
+        if _all_connected:
+            if IS_INTERACTIVE and _live is not None:
+                # Interactive mode: use rich Live display
+                _refresh_status()
+            else:
+                # Non-interactive (journalctl): print periodically
+                now = time.time()
+                if now - _last_print_time >= 5:  # Print every 5 seconds
+                    _last_print_time = now
+                    _print_all_status()
 
 
 def get_trading_client():
@@ -197,17 +221,6 @@ def get_trading_client():
         _trading_client = ClobClient(CLOB_HOST, key=PRIVATE_KEY, chain_id=POLYGON, signature_type=2, funder=FUNDER)
         _trading_client.set_api_creds(_trading_client.create_or_derive_api_creds())
     return _trading_client
-
-
-# Read-only client for order book queries (no API creds needed)
-_read_client = None
-
-def get_read_client():
-    """Get or create a read-only client for order book queries."""
-    global _read_client
-    if _read_client is None:
-        _read_client = ClobClient(CLOB_HOST, chain_id=POLYGON)
-    return _read_client
 
 
 def get_current_et_time():
@@ -271,9 +284,10 @@ def fetch_market_by_slug(slug: str) -> dict | None:
 
 
 def get_order_book(token_id: str) -> dict | None:
-    """Fetch order book for a token via REST API."""
+    """Fetch order book for a token via REST API (fresh client each time)."""
     try:
-        client = get_read_client()
+        # Create fresh client to avoid stale connections
+        client = ClobClient(CLOB_HOST, chain_id=POLYGON)
         book = client.get_order_book(token_id)
         
         # Handle OrderBookSummary object - convert to dict format
@@ -671,9 +685,9 @@ class SniperMonitor:
 def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.98, monitor_label: str = None) -> bool:
     """Execute snipe trade."""
     label = monitor_label or "UNKNOWN"
+    ws_price = opportunity.get("price", 0)
 
     if not EXECUTE_TRADES:
-        print(f"[{label}] DEBUG: EXECUTE_TRADES is False")
         return False
 
     try:
@@ -683,28 +697,26 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         token_id = opportunity["token_id"]
         order_book = get_order_book(token_id)
 
-        if not order_book:
-            print(f"[{label}] DEBUG: No orderbook from REST API")
+        if not order_book or not order_book.get("asks"):
+            print(f"[{label}] ⚠️ No REST orderbook (WS showed ${ws_price:.2f})")
             return False
 
         asks = order_book.get("asks", [])
-        if not asks:
-            print(f"[{label}] DEBUG: No asks in REST orderbook")
-            return False
 
         # Verify there's liquidity at a reasonable price
         best_ask_price = float(asks[0].get("price", 0))
         best_ask_size = float(asks[0].get("size", 0))
 
         if best_ask_size <= 0:
-            print(f"[{label}] DEBUG: REST ask size is 0")
+            print(f"[{label}] ⚠️ REST size=0 (WS showed ${ws_price:.2f})")
             return False
 
         # Verify REST price also meets target (don't trust WebSocket alone)
         # Use same epsilon as WebSocket check for consistency
         epsilon = 0.005
         if best_ask_price < (target_price - epsilon):
-            print(f"[{label}] DEBUG: REST price ${best_ask_price:.4f} < target ${target_price - epsilon:.4f}")
+            # Only log once per price change to avoid spam
+            print(f"[{label}] ⚠️ REST ${best_ask_price:.2f} < WS ${ws_price:.2f} (target ${target_price:.2f})")
             return False
 
         price = round(best_ask_price, 2)
@@ -724,13 +736,11 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
             size = available
 
         if size < 1:
-            print(f"[{label}] DEBUG: Size < 1 after capping (available={available})")
             return False
 
         # Check position limit
         cost = size * price
         if not can_open_position(cost):
-            print(f"[{label}] DEBUG: Max exposure reached (cost=${cost:.2f}, total=${get_total_exposure():.2f})")
             return False
 
         # Create and execute order
@@ -841,26 +851,30 @@ def monitor_all_assets():
     """Main entry point: monitor all configured assets in parallel."""
     global _live, _all_connected
 
-    _console.print(f"\n[bold cyan]{'='*70}[/bold cyan]")
-    _console.print(f"[bold]🎯 MULTI-ASSET 15M RESOLUTION SNIPER (WebSocket)[/bold]")
-    _console.print(f"[bold cyan]{'='*70}[/bold cyan]")
-    _console.print(f"   Assets: {', '.join(a.upper() for a in MONITORED_ASSETS)}")
-    _console.print(f"   Target prices: ${PRICE_TIERS[-1][1]:.2f} (>60s) → ${PRICE_TIERS[1][1]:.2f} (30-60s) → ${PRICE_TIERS[0][1]:.2f} (<30s)")
-    _console.print(f"\n   💰 Trading: [{'green' if EXECUTE_TRADES else 'red'}]{'ENABLED' if EXECUTE_TRADES else 'DISABLED'}[/]")
+    # Startup banner (works in both modes)
+    print(f"\n{'='*70}")
+    print(f"🎯 MULTI-ASSET 15M RESOLUTION SNIPER (WebSocket)")
+    print(f"{'='*70}")
+    print(f"   Mode: {'Interactive' if IS_INTERACTIVE else 'Non-interactive (journalctl)'}")
+    print(f"   Assets: {', '.join(a.upper() for a in MONITORED_ASSETS)}")
+    print(f"   Target prices: ${PRICE_TIERS[-1][1]:.2f} (>60s) → ${PRICE_TIERS[1][1]:.2f} (30-60s) → ${PRICE_TIERS[0][1]:.2f} (<30s)")
+    print(f"\n   💰 Trading: {'ENABLED' if EXECUTE_TRADES else 'DISABLED'}")
     if EXECUTE_TRADES:
-        _console.print(f"   📊 Max position: ${MAX_POSITION_SIZE} per trade")
-        _console.print(f"   🤖 Auto-snipe: {AUTO_SNIPE}")
-    _console.print(f"\n   🛑 Press Ctrl+C to stop")
-    _console.print(f"[bold cyan]{'='*70}[/bold cyan]\n")
+        print(f"   📊 Max position: ${MAX_POSITION_SIZE} per trade")
+        print(f"   🤖 Auto-snipe: {AUTO_SNIPE}")
+    print(f"\n   🛑 Press Ctrl+C to stop")
+    print(f"{'='*70}\n")
+    sys.stdout.flush()
 
     # Pre-warm trading client if enabled
     if EXECUTE_TRADES:
         try:
-            _console.print("⚡ Pre-warming trading client...")
+            print("⚡ Pre-warming trading client...")
             get_trading_client()
-            _console.print("✅ Trading client ready!\n")
+            print("✅ Trading client ready!\n")
         except Exception as e:
-            _console.print(f"[red]❌ Failed to init trading client: {e}[/red]\n")
+            print(f"❌ Failed to init trading client: {e}\n")
+        sys.stdout.flush()
 
     # Start one thread per asset
     threads = []
@@ -874,20 +888,29 @@ def monitor_all_assets():
     while _connected_count < _expected_connections:
         time.sleep(0.1)
 
-    _console.print("\n[bold green]✅ All WebSockets connected![/bold green]\n")
+    print("\n✅ All WebSockets connected!\n")
     _all_connected = True
 
-    # Main thread runs the live display
+    # Main thread runs the display
     try:
-        with Live(_build_status_table(), console=_console, refresh_per_second=2, transient=False) as live:
-            _live = live
+        if IS_INTERACTIVE:
+            # Interactive mode: use rich Live display for in-place updates
+            with Live(_build_status_table(), console=_console, refresh_per_second=2, transient=False) as live:
+                _live = live
+                while True:
+                    time.sleep(0.5)
+        else:
+            # Non-interactive mode (systemd/journalctl): print periodically
+            print("Running in non-interactive mode (journalctl). Status updates every 5 seconds.\n")
             while True:
-                time.sleep(0.5)
+                time.sleep(5)
+                with _print_lock:
+                    _print_all_status()
     except KeyboardInterrupt:
         _live = None
-        _console.print(f"\n\n[bold cyan]{'='*70}[/bold cyan]")
-        _console.print("[bold]🛑 MONITORING STOPPED[/bold]")
-        _console.print(f"[bold cyan]{'='*70}[/bold cyan]")
+        print(f"\n\n{'='*70}")
+        print("🛑 MONITORING STOPPED")
+        print(f"{'='*70}")
 
 
 def main():
