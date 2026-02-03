@@ -97,6 +97,21 @@ MAX_TOTAL_EXPOSURE = 200  # Maximum total USDC across all positions
 # Trade logger
 _trade_logger = None
 
+# Dashboard data (shared with web dashboard)
+_dashboard_data = {
+    "assets": {},      # {BITCOIN: {timer, target, up_price, up_size, down_price, down_size, status}}
+    "trades": [],      # Recent trades list (last 50)
+    "errors": [],      # Recent errors (last 20)
+    "updated": "",     # Timestamp
+    "config": {
+        "execute_trades": EXECUTE_TRADES,
+        "max_position": MAX_POSITION_SIZE,
+        "max_exposure": MAX_TOTAL_EXPOSURE,
+        "auto_snipe": AUTO_SNIPE,
+    }
+}
+_dashboard_lock = threading.Lock()
+
 
 def _setup_trade_logger():
     """Setup file logger for trades."""
@@ -189,6 +204,59 @@ def _print_all_status():
         # Strip any ANSI codes just in case
         print(status)
     sys.stdout.flush()
+
+
+def update_dashboard_asset(label: str, timer: str, target: float,
+                           up_price: float, up_size: float,
+                           down_price: float, down_size: float,
+                           status: str = ""):
+    """Update dashboard data for an asset."""
+    with _dashboard_lock:
+        _dashboard_data["assets"][label] = {
+            "timer": timer,
+            "target": target,
+            "up_price": up_price,
+            "up_size": int(up_size),
+            "down_price": down_price,
+            "down_size": int(down_size),
+            "status": status,
+        }
+        _dashboard_data["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def add_dashboard_trade(label: str, side: str, price: float, size: int, success: bool):
+    """Add a trade to dashboard history."""
+    with _dashboard_lock:
+        trade = {
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "asset": label,
+            "side": side,
+            "price": price,
+            "size": size,
+            "success": success,
+        }
+        _dashboard_data["trades"].insert(0, trade)
+        # Keep only last 50 trades
+        _dashboard_data["trades"] = _dashboard_data["trades"][:50]
+
+
+def add_dashboard_error(label: str, message: str):
+    """Add an error to dashboard error log."""
+    with _dashboard_lock:
+        error = {
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "asset": label,
+            "message": message,
+        }
+        _dashboard_data["errors"].insert(0, error)
+        # Keep only last 20 errors
+        _dashboard_data["errors"] = _dashboard_data["errors"][:20]
+
+
+def get_dashboard_data() -> dict:
+    """Get a copy of dashboard data (thread-safe)."""
+    with _dashboard_lock:
+        return json.loads(json.dumps(_dashboard_data))
 
 
 def _update_asset_status(label: str, status: str):
@@ -487,6 +555,16 @@ class SniperMonitor:
         price_sum = self.up_price + self.down_price
         prices_valid = price_sum <= 1.15
 
+        # Update dashboard data
+        timer_str = f"{mins:02d}:{secs:02d}"
+        dash_status = "sniped" if self.snipe_executed else ("warming" if not self.warmed_up else ("stale" if not prices_valid else "monitoring"))
+        update_dashboard_asset(
+            self.asset_label, timer_str, target,
+            self.up_price, self.up_size,
+            self.down_price, self.down_size,
+            dash_status
+        )
+
         # Check if price hits target
         if not self.snipe_executed:
             if not self.warmed_up:
@@ -698,7 +776,8 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         order_book = get_order_book(token_id)
 
         if not order_book or not order_book.get("asks"):
-            print(f"[{label}] ⚠️ No REST orderbook (WS showed ${ws_price:.2f})")
+            msg = f"No REST orderbook (WS showed ${ws_price:.2f})"
+            add_dashboard_error(label, msg)
             return False
 
         asks = order_book.get("asks", [])
@@ -708,15 +787,16 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         best_ask_size = float(asks[0].get("size", 0))
 
         if best_ask_size <= 0:
-            print(f"[{label}] ⚠️ REST size=0 (WS showed ${ws_price:.2f})")
+            msg = f"REST size=0 (WS showed ${ws_price:.2f})"
+            add_dashboard_error(label, msg)
             return False
 
         # Verify REST price also meets target (don't trust WebSocket alone)
         # Use same epsilon as WebSocket check for consistency
         epsilon = 0.005
         if best_ask_price < (target_price - epsilon):
-            # Only log once per price change to avoid spam
-            print(f"[{label}] ⚠️ REST ${best_ask_price:.2f} < WS ${ws_price:.2f} (target ${target_price:.2f})")
+            msg = f"REST ${best_ask_price:.2f} < WS ${ws_price:.2f} (target ${target_price:.2f})"
+            add_dashboard_error(label, msg)
             return False
 
         price = round(best_ask_price, 2)
@@ -761,6 +841,9 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         # Log the trade
         log_trade(monitor_label or "UNKNOWN", opportunity["side"], price, size, success, order_id)
 
+        # Add to dashboard
+        add_dashboard_trade(label, opportunity["side"], price, size, success)
+
         # Record position if successful
         if success:
             record_position(monitor_label or "UNKNOWN", opportunity["side"], size, price)
@@ -768,6 +851,7 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         return success
 
     except Exception as e:
+        add_dashboard_error(label, f"Exception: {str(e)[:50]}")
         return False
 
 
