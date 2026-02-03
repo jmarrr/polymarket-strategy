@@ -280,10 +280,10 @@ def _update_asset_status(label: str, status: str):
                     _print_all_status()
 
 
-def get_trading_client():
-    """Get or create the trading client."""
+def get_trading_client(force_refresh=False):
+    """Get or create the trading client. Use force_refresh=True to recreate on 403 errors."""
     global _trading_client
-    if _trading_client is None:
+    if _trading_client is None or force_refresh:
         if not PRIVATE_KEY or not FUNDER:
             raise ValueError("PRIVATE_KEY and FUNDER_ADDRESS required for trading")
         _trading_client = ClobClient(CLOB_HOST, key=PRIVATE_KEY, chain_id=POLYGON, signature_type=2, funder=FUNDER)
@@ -712,7 +712,7 @@ class SniperMonitor:
             self.ws.close()
 
 
-def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.98, monitor_label: str = None) -> bool:
+def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.98, monitor_label: str = None, _retry: bool = False) -> bool:
     """Execute snipe trade using WebSocket prices. FOK order handles price validation."""
     label = monitor_label or "UNKNOWN"
 
@@ -775,7 +775,13 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         return success
 
     except Exception as e:
-        add_dashboard_error(label, f"Exception: {str(e)[:50]}")
+        error_str = str(e)
+        # On 403 error, refresh credentials and retry once
+        if "403" in error_str and not _retry:
+            add_dashboard_error(label, "403 error - refreshing credentials...")
+            get_trading_client(force_refresh=True)
+            return execute_snipe(opportunity, size, target_price, monitor_label, _retry=True)
+        add_dashboard_error(label, f"Exception: {error_str[:100]}")
         return False
 
 
