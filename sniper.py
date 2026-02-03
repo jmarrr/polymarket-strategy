@@ -378,6 +378,8 @@ class SniperMonitor:
         self.update_count = 0
         self.warmed_up = False  # Skip initial stale book snapshots
         self.stopped = False
+        self.last_snipe_attempt = 0  # Timestamp of last attempt
+        self.snipe_cooldown = 10  # Seconds to wait after failed attempt
         
         # Current prices (updated in real-time)
         self.up_price = 0.0
@@ -528,7 +530,8 @@ class SniperMonitor:
 
         # Update dashboard data
         timer_str = f"{mins:02d}:{secs:02d}"
-        dash_status = "sniped" if self.snipe_executed else ("warming" if not self.warmed_up else ("stale" if not prices_valid else "monitoring"))
+        in_cooldown = self.last_snipe_attempt > 0 and (time.time() - self.last_snipe_attempt) < self.snipe_cooldown
+        dash_status = "sniped" if self.snipe_executed else ("cooldown" if in_cooldown else ("warming" if not self.warmed_up else ("stale" if not prices_valid else "monitoring")))
         update_dashboard_asset(
             self.asset_label, timer_str, target,
             self.up_price, self.up_size,
@@ -547,13 +550,20 @@ class SniperMonitor:
 
                 if opportunity:
                     if EXECUTE_TRADES and AUTO_SNIPE:
-                        # Check if already sniped or currently attempting
+                        # Check if already sniped, currently attempting, or in cooldown
                         with _trade_lock:
                             if self.snipe_executed:
                                 status += "✅ SNIPED!"
                                 _update_asset_status(self.asset_label, status)
                                 return
                             if hasattr(self, '_attempting_snipe') and self._attempting_snipe:
+                                _update_asset_status(self.asset_label, status)
+                                return
+                            # Check cooldown after failed attempts
+                            now = time.time()
+                            if self.last_snipe_attempt > 0 and (now - self.last_snipe_attempt) < self.snipe_cooldown:
+                                remaining = int(self.snipe_cooldown - (now - self.last_snipe_attempt))
+                                status += f"⏳ Cooldown ({remaining}s)"
                                 _update_asset_status(self.asset_label, status)
                                 return
                             self._attempting_snipe = True
@@ -564,6 +574,10 @@ class SniperMonitor:
                                 with _trade_lock:
                                     self.snipe_executed = True
                                 status += "✅ SNIPED!"
+                            else:
+                                # Failed - set cooldown
+                                self.last_snipe_attempt = time.time()
+                                status += f"❌ Failed (cooldown {self.snipe_cooldown}s)"
                         finally:
                             self._attempting_snipe = False
                         _update_asset_status(self.asset_label, status)

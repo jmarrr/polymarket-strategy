@@ -229,7 +229,8 @@
                 'sniped': ['SNIPED', 'status-sniped'],
                 'monitoring': ['Monitoring', 'status-monitoring'],
                 'warming': ['Warming Up', 'status-warming'],
-                'stale': ['Stale Data', 'status-stale']
+                'stale': ['Stale Data', 'status-stale'],
+                'cooldown': ['Cooldown', 'status-stale']
             };
             const [text, cls] = statusMap[status] || [status, ''];
             return `<span class="${cls}">${text}</span>`;
