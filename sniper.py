@@ -351,46 +351,6 @@ def fetch_market_by_slug(slug: str) -> dict | None:
         return None
 
 
-def get_order_book(token_id: str) -> dict | None:
-    """Fetch order book for a token via REST API (fresh client each time)."""
-    try:
-        # Create fresh client to avoid stale connections
-        client = ClobClient(CLOB_HOST, chain_id=POLYGON)
-        book = client.get_order_book(token_id)
-        
-        # Handle OrderBookSummary object - convert to dict format
-        if hasattr(book, 'asks') and hasattr(book, 'bids'):
-            # It's an OrderBookSummary object
-            asks = []
-            bids = []
-            
-            # Convert asks
-            if book.asks:
-                for ask in book.asks:
-                    if hasattr(ask, 'price') and hasattr(ask, 'size'):
-                        asks.append({"price": str(ask.price), "size": str(ask.size)})
-                    elif isinstance(ask, dict):
-                        asks.append(ask)
-            
-            # Convert bids
-            if book.bids:
-                for bid in book.bids:
-                    if hasattr(bid, 'price') and hasattr(bid, 'size'):
-                        bids.append({"price": str(bid.price), "size": str(bid.size)})
-                    elif isinstance(bid, dict):
-                        bids.append(bid)
-            
-            # Sort asks ascending, bids descending (best prices first)
-            asks.sort(key=lambda x: float(x["price"]))
-            bids.sort(key=lambda x: float(x["price"]), reverse=True)
-            return {"asks": asks, "bids": bids}
-
-        # Already a dict
-        return book
-    except Exception as e:
-        return None
-
-
 class SniperMonitor:
     """WebSocket-based order book monitor for sniping near resolution."""
     
@@ -697,25 +657,6 @@ class SniperMonitor:
 
         threading.Thread(target=refresh_loop, daemon=True).start()
 
-        # Periodic REST sync to correct WebSocket drift (every 10 seconds)
-        def sync_loop():
-            while self.running:
-                try:
-                    time.sleep(10)  # Less frequent to avoid rate limits
-                    if not self.running:
-                        break
-                    # Sync orderbook from REST to fix any drift
-                    up_book = get_order_book(self.up_token) if self.up_token else None
-                    down_book = get_order_book(self.down_token) if self.down_token else None
-                    if up_book and down_book:
-                        self.orderbooks[self.up_token] = up_book
-                        self.orderbooks[self.down_token] = down_book
-                        self.warmed_up = True
-                except:
-                    pass
-
-        threading.Thread(target=sync_loop, daemon=True).start()
-
     def run(self):
         """Start the WebSocket connection with auto-reconnect."""
         ws_url = f"{WS_URL}/ws/market"
@@ -761,9 +702,8 @@ class SniperMonitor:
 
 
 def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.98, monitor_label: str = None) -> bool:
-    """Execute snipe trade."""
+    """Execute snipe trade using WebSocket prices. FOK order handles price validation."""
     label = monitor_label or "UNKNOWN"
-    ws_price = opportunity.get("price", 0)
 
     if not EXECUTE_TRADES:
         return False
@@ -771,35 +711,8 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
     try:
         client = get_trading_client()
 
-        # Verify orderbook liquidity is available before executing
-        token_id = opportunity["token_id"]
-        order_book = get_order_book(token_id)
-
-        if not order_book or not order_book.get("asks"):
-            msg = f"No REST orderbook (WS showed ${ws_price:.2f})"
-            add_dashboard_error(label, msg)
-            return False
-
-        asks = order_book.get("asks", [])
-
-        # Verify there's liquidity at a reasonable price
-        best_ask_price = float(asks[0].get("price", 0))
-        best_ask_size = float(asks[0].get("size", 0))
-
-        if best_ask_size <= 0:
-            msg = f"REST size=0 (WS showed ${ws_price:.2f})"
-            add_dashboard_error(label, msg)
-            return False
-
-        # Verify REST price also meets target (don't trust WebSocket alone)
-        # Use same epsilon as WebSocket check for consistency
-        epsilon = 0.005
-        if best_ask_price < (target_price - epsilon):
-            msg = f"REST ${best_ask_price:.2f} < WS ${ws_price:.2f} (target ${target_price:.2f})"
-            add_dashboard_error(label, msg)
-            return False
-
-        price = round(best_ask_price, 2)
+        # Use WebSocket price directly - FOK will fail if price doesn't exist
+        price = round(opportunity["price"], 2)
 
         # Calculate position size
         if size is None:
@@ -810,8 +723,8 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         if size < min_shares:
             size = min_shares
 
-        # Cap by available liquidity (use fresh orderbook data)
-        available = int(min(opportunity["size"], best_ask_size))
+        # Cap by available liquidity from WebSocket
+        available = int(opportunity["size"])
         if size > available:
             size = available
 
