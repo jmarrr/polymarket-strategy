@@ -26,6 +26,12 @@ from py_clob_client.constants import POLYGON
 from py_clob_client.order_builder.constants import BUY
 from dotenv import load_dotenv
 
+# Rich for beautiful terminal display
+from rich.console import Console
+from rich.live import Live
+from rich.table import Table
+from rich.text import Text
+
 load_dotenv()
 
 # API Configuration
@@ -64,8 +70,12 @@ _trading_client = None
 _trade_lock = threading.Lock()
 _print_lock = threading.Lock()
 
-# Per-asset status lines (updated in-place on screen)
-_asset_status = {}  # {label: status_string}
+# Rich console for display
+_console = Console()
+_live = None  # Will be initialized in main
+
+# Per-asset status data (for rich table)
+_asset_status = {}  # {label: {timer, target, up_price, up_size, down_price, down_size, status}}
 _asset_order = []   # ordered list of labels for consistent display
 
 # Gate output until all WebSockets are connected
@@ -134,36 +144,47 @@ def get_total_exposure() -> float:
         return _total_exposure
 
 
-def _refresh_status():
-    """Redraw all asset status lines in place."""
-    if not _asset_order:
-        return
-    # Move cursor up N lines, overwrite each, then move back down
-    n = len(_asset_order)
-    lines = []
+def _build_status_table() -> Table:
+    """Build a rich table from current asset status."""
+    table = Table(show_header=False, box=None, padding=(0, 1))
+    table.add_column("Status", style="white", no_wrap=True)
+
     for label in _asset_order:
-        line = _asset_status.get(label, "")
-        lines.append(f"\r{line}\033[K")  # \033[K clears rest of line
-    output = f"\033[{n}A" + "\n".join(lines) + "\n"
-    print(output, end="", flush=True)
+        status = _asset_status.get(label, "")
+        # Color based on content
+        if "SNIPED" in status:
+            style = "bold green"
+        elif "Warming" in status:
+            style = "yellow"
+        elif "Stale" in status or "⚠️" in status:
+            style = "red"
+        else:
+            style = "white"
+        table.add_row(Text(status, style=style))
+
+    return table
+
+
+def _refresh_status():
+    """Refresh the live display."""
+    global _live
+    if _live is not None:
+        try:
+            _live.update(_build_status_table())
+        except Exception:
+            pass  # Ignore display errors
 
 
 def _update_asset_status(label: str, status: str):
     """Thread-safe update of an asset's status line."""
     global _all_connected
     with _print_lock:
-        if not _all_connected:
-            _asset_status[label] = status
-            if label not in _asset_order:
-                _asset_order.append(label)
-            return
-        if label not in _asset_status:
+        if label not in _asset_order:
             _asset_order.append(label)
-            _asset_status[label] = status
-            # Print a new blank line to reserve space
-            print(status, flush=True)
-        else:
-            _asset_status[label] = status
+
+        _asset_status[label] = status
+
+        if _all_connected and _live is not None:
             _refresh_status()
 
 
@@ -546,19 +567,13 @@ class SniperMonitor:
 
     def on_open(self, ws):
         """Handle WebSocket connection open."""
-        global _connected_count, _all_connected
+        global _connected_count
 
         # Reset warmup on reconnect so we don't trade on stale data
         self.warmed_up = False
 
-        # Track connections; once all connected, flush buffered status lines
+        # Track connections
         _connected_count += 1
-        if not _all_connected and _connected_count >= _expected_connections:
-            _all_connected = True
-            with _print_lock:
-                print("✅ All WebSockets connected!\n")
-                for label in _asset_order:
-                    print(_asset_status.get(label, ""), flush=True)
 
         # Subscribe to market tokens
         subscribe_msg = {
@@ -824,27 +839,28 @@ def monitor_asset(asset: str):
 
 def monitor_all_assets():
     """Main entry point: monitor all configured assets in parallel."""
+    global _live, _all_connected
 
-    print(f"\n{'='*70}")
-    print(f"🎯 MULTI-ASSET 15M RESOLUTION SNIPER (WebSocket)")
-    print(f"{'='*70}")
-    print(f"   Assets: {', '.join(a.upper() for a in MONITORED_ASSETS)}")
-    print(f"   Target prices: ${PRICE_TIERS[-1][1]:.2f} (>60s) → ${PRICE_TIERS[1][1]:.2f} (30-60s) → ${PRICE_TIERS[0][1]:.2f} (<30s)")
-    print(f"\n   💰 Trading: {'ENABLED' if EXECUTE_TRADES else 'DISABLED'}")
+    _console.print(f"\n[bold cyan]{'='*70}[/bold cyan]")
+    _console.print(f"[bold]🎯 MULTI-ASSET 15M RESOLUTION SNIPER (WebSocket)[/bold]")
+    _console.print(f"[bold cyan]{'='*70}[/bold cyan]")
+    _console.print(f"   Assets: {', '.join(a.upper() for a in MONITORED_ASSETS)}")
+    _console.print(f"   Target prices: ${PRICE_TIERS[-1][1]:.2f} (>60s) → ${PRICE_TIERS[1][1]:.2f} (30-60s) → ${PRICE_TIERS[0][1]:.2f} (<30s)")
+    _console.print(f"\n   💰 Trading: [{'green' if EXECUTE_TRADES else 'red'}]{'ENABLED' if EXECUTE_TRADES else 'DISABLED'}[/]")
     if EXECUTE_TRADES:
-        print(f"   📊 Max position: ${MAX_POSITION_SIZE} per trade")
-        print(f"   🤖 Auto-snipe: {AUTO_SNIPE}")
-    print(f"\n   🛑 Press Ctrl+C to stop")
-    print(f"{'='*70}\n")
+        _console.print(f"   📊 Max position: ${MAX_POSITION_SIZE} per trade")
+        _console.print(f"   🤖 Auto-snipe: {AUTO_SNIPE}")
+    _console.print(f"\n   🛑 Press Ctrl+C to stop")
+    _console.print(f"[bold cyan]{'='*70}[/bold cyan]\n")
 
     # Pre-warm trading client if enabled
     if EXECUTE_TRADES:
         try:
-            print("⚡ Pre-warming trading client...")
+            _console.print("⚡ Pre-warming trading client...")
             get_trading_client()
-            print("✅ Trading client ready!\n")
+            _console.print("✅ Trading client ready!\n")
         except Exception as e:
-            print(f"❌ Failed to init trading client: {e}\n")
+            _console.print(f"[red]❌ Failed to init trading client: {e}[/red]\n")
 
     # Start one thread per asset
     threads = []
@@ -854,14 +870,24 @@ def monitor_all_assets():
         threads.append(t)
         time.sleep(0.5)  # Stagger starts to avoid API burst
 
-    # Main thread blocks until Ctrl+C
+    # Wait for all WebSockets to connect
+    while _connected_count < _expected_connections:
+        time.sleep(0.1)
+
+    _console.print("\n[bold green]✅ All WebSockets connected![/bold green]\n")
+    _all_connected = True
+
+    # Main thread runs the live display
     try:
-        while True:
-            time.sleep(1)
+        with Live(_build_status_table(), console=_console, refresh_per_second=2, transient=False) as live:
+            _live = live
+            while True:
+                time.sleep(0.5)
     except KeyboardInterrupt:
-        print(f"\n\n{'='*70}")
-        print("🛑 MONITORING STOPPED")
-        print(f"{'='*70}")
+        _live = None
+        _console.print(f"\n\n[bold cyan]{'='*70}[/bold cyan]")
+        _console.print("[bold]🛑 MONITORING STOPPED[/bold]")
+        _console.print(f"[bold cyan]{'='*70}[/bold cyan]")
 
 
 def main():
