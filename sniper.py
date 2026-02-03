@@ -458,34 +458,35 @@ class SniperMonitor:
                 opportunity = self.get_best_opportunity(target)
 
                 if opportunity:
-                    status += f"🎯 {opportunity['side']} @ ${opportunity['price']:.2f}"
-                    _update_asset_status(self.asset_label, status)
-
                     if EXECUTE_TRADES and AUTO_SNIPE:
-                        # Prevent double execution from concurrent threads
+                        # Check if already sniped BEFORE attempting trade
                         with _trade_lock:
                             if self.snipe_executed:
+                                status += "✅ SNIPED!"
+                                _update_asset_status(self.asset_label, status)
                                 return
                             self.snipe_executed = True
+
                         success = execute_snipe(opportunity, target_price=target, monitor_label=self.asset_label)
                         if success:
-                            # Immediately show SNIPED status
-                            sniped_status = f"[{self.asset_label}]".ljust(12) + f"⏱ {self.countdown_display} | 🎯 ${target:.2f} | UP: ${self.up_price:.2f} | DOWN: ${self.down_price:.2f} | ✅ SNIPED!"
-                            _update_asset_status(self.asset_label, sniped_status)
+                            status += "✅ SNIPED!"
                         else:
                             self.snipe_executed = False
+                            status += "Waiting for target price"
+                        _update_asset_status(self.asset_label, status)
                     elif EXECUTE_TRADES:
+                        status += f"🎯 {opportunity['side']} @ ${opportunity['price']:.2f}"
+                        _update_asset_status(self.asset_label, status)
                         confirm = input("\n   Execute snipe? (y/n): ").strip().lower()
                         if confirm == "y":
                             success = execute_snipe(opportunity, target_price=target, monitor_label=self.asset_label)
                             if success:
                                 self.snipe_executed = True
-                                sniped_status = f"[{self.asset_label}]".ljust(12) + f"⏱ {self.countdown_display} | 🎯 ${target:.2f} | UP: ${self.up_price:.2f} | DOWN: ${self.down_price:.2f} | ✅ SNIPED!"
-                                _update_asset_status(self.asset_label, sniped_status)
+                                status = f"[{self.asset_label}]".ljust(12) + f"⏱ {self.countdown_display} | 🎯 ${target:.2f} | UP: ${self.up_price:.2f} | DOWN: ${self.down_price:.2f} | ✅ SNIPED!"
+                                _update_asset_status(self.asset_label, status)
                     else:
                         _update_asset_status(self.asset_label, f"[{self.asset_label}]".ljust(12) + "| ⚠️ Trading disabled")
                         self.snipe_executed = True
-
                     return
                 else:
                     status += "Waiting for target price"
