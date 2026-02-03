@@ -655,7 +655,10 @@ class SniperMonitor:
 
 def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.98, monitor_label: str = None) -> bool:
     """Execute snipe trade."""
+    label = monitor_label or "UNKNOWN"
+
     if not EXECUTE_TRADES:
+        print(f"[{label}] DEBUG: EXECUTE_TRADES is False")
         return False
 
     try:
@@ -666,10 +669,12 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         order_book = get_order_book(token_id)
 
         if not order_book:
+            print(f"[{label}] DEBUG: No orderbook from REST API")
             return False
 
         asks = order_book.get("asks", [])
         if not asks:
+            print(f"[{label}] DEBUG: No asks in REST orderbook")
             return False
 
         # Verify there's liquidity at a reasonable price
@@ -677,12 +682,14 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         best_ask_size = float(asks[0].get("size", 0))
 
         if best_ask_size <= 0:
+            print(f"[{label}] DEBUG: REST ask size is 0")
             return False
 
         # Verify REST price also meets target (don't trust WebSocket alone)
         # Use same epsilon as WebSocket check for consistency
         epsilon = 0.005
         if best_ask_price < (target_price - epsilon):
+            print(f"[{label}] DEBUG: REST price ${best_ask_price:.4f} < target ${target_price - epsilon:.4f}")
             return False
 
         price = round(best_ask_price, 2)
@@ -702,11 +709,13 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
             size = available
 
         if size < 1:
+            print(f"[{label}] DEBUG: Size < 1 after capping (available={available})")
             return False
 
         # Check position limit
         cost = size * price
         if not can_open_position(cost):
+            print(f"[{label}] DEBUG: Max exposure reached (cost=${cost:.2f}, total=${get_total_exposure():.2f})")
             return False
 
         # Create and execute order
