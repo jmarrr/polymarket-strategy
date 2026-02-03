@@ -43,7 +43,7 @@ MONITORED_ASSETS = ["bitcoin", "ethereum", "solana", "xrp"]
 PRICE_TIERS = [
     (30, 0.85),   # <= 30s: $0.85 (aggressive)
     (60, 0.92),   # <= 60s: $0.92 (medium)
-    (float('inf'), 0.98),  # > 60s: $0.98 (conservative)
+    (float('inf'), 0.96),  # > 60s: $0.98 (conservative)
 ]
 
 
@@ -67,6 +67,7 @@ _print_lock = threading.Lock()
 # Per-asset status lines (updated in-place on screen)
 _asset_status = {}  # {label: status_string}
 _asset_order = []   # ordered list of labels for consistent display
+_error_messages = {}  # {label: error_message} for dedicated error line
 
 # Gate output until all WebSockets are connected
 _connected_count = 0
@@ -131,17 +132,46 @@ def get_total_exposure() -> float:
 
 
 def _refresh_status():
-    """Redraw all asset status lines in place."""
+    """Redraw all asset status lines in place, plus error summary line."""
     if not _asset_order:
         return
-    # Move cursor up N lines, overwrite each, then move back down
-    n = len(_asset_order)
+    # Move cursor up N+2 lines (assets + separator + error line)
+    n = len(_asset_order) + 2
     lines = []
     for label in _asset_order:
         line = _asset_status.get(label, "")
         lines.append(f"\r{line}\033[K")  # \033[K clears rest of line
+
+    # Add separator line
+    lines.append(f"\r{'─' * 70}\033[K")
+
+    # Build error summary line
+    errors = [f"{lbl}: {msg}" for lbl, msg in _error_messages.items() if msg]
+    if errors:
+        error_line = f"\r⚠️  " + " | ".join(errors) + "\033[K"
+    else:
+        error_line = f"\r\033[K"  # Empty error line
+    lines.append(error_line)
+
     output = f"\033[{n}A" + "\n".join(lines) + "\n"
     print(output, end="", flush=True)
+
+
+def _update_error(label: str, msg: str):
+    """Update error message for an asset (shown on dedicated error line)."""
+    with _print_lock:
+        _error_messages[label] = msg
+        if _all_connected:
+            _refresh_status()
+
+
+def _clear_error(label: str):
+    """Clear error message for an asset."""
+    with _print_lock:
+        if label in _error_messages:
+            _error_messages[label] = ""
+            if _all_connected:
+                _refresh_status()
 
 
 def _update_asset_status(label: str, status: str):
@@ -439,8 +469,8 @@ class SniperMonitor:
             f"{tag} "
             f"⏱️ {mins:02d}:{secs:02d} | "
             f"🎯 ${target:.2f} | "
-            f"UP: ${self.up_price:.2f} | "
-            f"DOWN: ${self.down_price:.2f} | "
+            f"UP: ${self.up_price:.2f} ({int(self.up_size)}) | "
+            f"DOWN: ${self.down_price:.2f} ({int(self.down_size)}) | "
         )
 
         # Sanity check: stale snapshots show both sides ~$0.99 (sum ~$1.98)
@@ -466,7 +496,6 @@ class SniperMonitor:
                                 _update_asset_status(self.asset_label, status)
                                 return
                             if hasattr(self, '_attempting_snipe') and self._attempting_snipe:
-                                status += "Waiting for target price"
                                 _update_asset_status(self.asset_label, status)
                                 return
                             self._attempting_snipe = True
@@ -477,8 +506,6 @@ class SniperMonitor:
                                 with _trade_lock:
                                     self.snipe_executed = True
                                 status += "✅ SNIPED!"
-                            else:
-                                status += "Waiting for target price"
                         finally:
                             self._attempting_snipe = False
                         _update_asset_status(self.asset_label, status)
@@ -496,8 +523,6 @@ class SniperMonitor:
                         _update_asset_status(self.asset_label, f"[{self.asset_label}]".ljust(12) + "| ⚠️ Trading disabled")
                         self.snipe_executed = True
                     return
-                else:
-                    status += "Waiting for target price"
         elif self.snipe_executed:
             status += "✅ SNIPED!"
 
@@ -507,7 +532,9 @@ class SniperMonitor:
         """Get best snipe opportunity if price in range."""
         opportunities = []
 
-        if self.up_price >= target_price and self.up_size > 0:
+        # Use small epsilon to match display rounding (0.9795 displays as $0.98)
+        epsilon = 0.005
+        if self.up_price >= (target_price - epsilon) and self.up_size > 0:
             opportunities.append({
                 "side": "UP",
                 "outcome": self.outcomes[self.up_idx],
@@ -518,7 +545,7 @@ class SniperMonitor:
                 "roi_percent": ((1.0 - self.up_price) / self.up_price) * 100,
             })
 
-        if self.down_price >= target_price and self.down_size > 0:
+        if self.down_price >= (target_price - epsilon) and self.down_size > 0:
             opportunities.append({
                 "side": "DOWN",
                 "outcome": self.outcomes[self.down_idx],
@@ -558,6 +585,9 @@ class SniperMonitor:
                 print("✅ All WebSockets connected!\n")
                 for label in _asset_order:
                     print(_asset_status.get(label, ""), flush=True)
+                # Print error line placeholder
+                print("─" * 70)
+                print("", flush=True)
 
         # Subscribe to market tokens
         subscribe_msg = {
@@ -656,7 +686,7 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
     """Execute snipe trade."""
     if not EXECUTE_TRADES:
         if monitor_label:
-            _update_asset_status(monitor_label, f"[{monitor_label}]".ljust(12) + "| ⚠️ Trading disabled")
+            _update_error(monitor_label, "Trading disabled")
         return False
 
     try:
@@ -668,13 +698,13 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
 
         if not order_book:
             if monitor_label:
-                _update_asset_status(monitor_label, f"[{monitor_label}]".ljust(12) + "| ⚠️ Orderbook unavailable")
+                _update_error(monitor_label, "Orderbook unavailable")
             return False
 
         asks = order_book.get("asks", [])
         if not asks:
             if monitor_label:
-                _update_asset_status(monitor_label, f"[{monitor_label}]".ljust(12) + "| ⚠️ No asks in orderbook")
+                _update_error(monitor_label, "No asks in orderbook")
             return False
 
         # Verify there's liquidity at a reasonable price
@@ -683,14 +713,18 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
 
         if best_ask_size <= 0:
             if monitor_label:
-                _update_asset_status(monitor_label, f"[{monitor_label}]".ljust(12) + "| ⚠️ No liquidity at best ask")
+                _update_error(monitor_label, "No liquidity at best ask")
             return False
 
         # Verify REST price also meets target (don't trust WebSocket alone)
         if best_ask_price < target_price:
             if monitor_label:
-                _update_asset_status(monitor_label, f"[{monitor_label}]".ljust(12) + f"| ⚠️ REST ${best_ask_price:.2f} < target ${target_price:.2f}")
+                _update_error(monitor_label, f"REST ${best_ask_price:.2f} < target ${target_price:.2f}")
             return False
+
+        # Clear error on successful validation
+        if monitor_label:
+            _clear_error(monitor_label)
 
         price = round(best_ask_price, 2)
 
@@ -710,14 +744,14 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
 
         if size < 1:
             if monitor_label:
-                _update_asset_status(monitor_label, f"[{monitor_label}]".ljust(12) + "| ⚠️ Insufficient liquidity")
+                _update_error(monitor_label, "Insufficient liquidity")
             return False
 
         # Check position limit
         cost = size * price
         if not can_open_position(cost):
             if monitor_label:
-                _update_asset_status(monitor_label, f"[{monitor_label}]".ljust(12) + f"| ⚠️ Max exposure reached")
+                _update_error(monitor_label, "Max exposure reached")
             return False
 
         # Create and execute order
@@ -746,7 +780,7 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
 
     except Exception as e:
         if monitor_label:
-            _update_asset_status(monitor_label, f"[{monitor_label}]".ljust(12) + f"| ❌ Error: {str(e)[:30]}")
+            _update_error(monitor_label, f"Error: {str(e)[:30]}")
         return False
 
 
