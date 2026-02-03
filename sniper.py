@@ -890,11 +890,24 @@ def monitor_all_assets():
         threads.append(t)
         time.sleep(0.5)  # Stagger starts to avoid API burst
 
-    # Wait for all WebSockets to connect
+    # Wait for all WebSockets to connect (with progress)
+    print("⏳ Connecting to markets...")
+    last_count = 0
+    wait_time = 0
     while _connected_count < _expected_connections:
-        time.sleep(0.1)
+        time.sleep(0.5)
+        wait_time += 0.5
+        if _connected_count > last_count:
+            print(f"   Connected: {_connected_count}/{_expected_connections}")
+            last_count = _connected_count
+        # Show waiting status every 10 seconds
+        if wait_time % 10 == 0 and wait_time > 0:
+            print(f"   Still waiting... ({_connected_count}/{_expected_connections} connected)")
+            # Show what each asset is doing
+            for label, status in _asset_status.items():
+                print(f"   {status}")
 
-    print("\n✅ All WebSockets connected!\n")
+    print(f"\n✅ All {_expected_connections} WebSockets connected!\n")
     _all_connected = True
 
     # Main thread runs the display
