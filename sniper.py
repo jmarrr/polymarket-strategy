@@ -27,23 +27,21 @@ from py_clob_client.constants import POLYGON
 from py_clob_client.order_builder.constants import BUY
 from dotenv import load_dotenv
 
-# Rich for beautiful terminal display (only used in interactive mode)
+# Rich for beautiful terminal display
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 
-# Detect if running in interactive terminal
-IS_INTERACTIVE = sys.stdout.isatty()
-
 load_dotenv()
 
 # API Configuration
-CLOB_HOST = os.getenv("CLOB_API_URL", "https://clob.polymarket.com")
+CLOB_HOST = "https://clob.polymarket.com"
 GAMMA_HOST = "https://gamma-api.polymarket.com"
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com"
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 FUNDER = os.getenv("FUNDER_ADDRESS")
+
 
 # Strategy Configuration
 MONITORED_ASSETS = ["bitcoin", "ethereum", "solana", "xrp"]
@@ -86,7 +84,6 @@ _asset_order = []   # ordered list of labels for consistent display
 _connected_count = 0
 _expected_connections = len(MONITORED_ASSETS)
 _all_connected = False
-_last_print_time = 0  # For non-interactive periodic printing
 
 # Position tracking
 _positions = {}  # {asset: {"side": str, "size": int, "price": float, "cost": float}}
@@ -195,17 +192,6 @@ def _refresh_status():
             pass  # Ignore display errors
 
 
-def _print_all_status():
-    """Print all asset statuses (for non-interactive mode like journalctl)."""
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    print(f"\n--- {timestamp} ---")
-    for label in _asset_order:
-        status = _asset_status.get(label, "")
-        # Strip any ANSI codes just in case
-        print(status)
-    sys.stdout.flush()
-
-
 def update_dashboard_asset(label: str, timer: str, target: float,
                            up_price: float, up_size: float,
                            down_price: float, down_size: float,
@@ -261,27 +247,19 @@ def get_dashboard_data() -> dict:
 
 def _update_asset_status(label: str, status: str):
     """Thread-safe update of an asset's status line."""
-    global _all_connected, _last_print_time
+    global _all_connected
     with _print_lock:
         if label not in _asset_order:
             _asset_order.append(label)
 
         _asset_status[label] = status
 
-        if _all_connected:
-            if IS_INTERACTIVE and _live is not None:
-                # Interactive mode: use rich Live display
-                _refresh_status()
-            else:
-                # Non-interactive (journalctl): print periodically
-                now = time.time()
-                if now - _last_print_time >= 5:  # Print every 5 seconds
-                    _last_print_time = now
-                    _print_all_status()
+        if _all_connected and _live is not None:
+            _refresh_status()
 
 
 def get_trading_client(force_refresh=False):
-    """Get or create the trading client. Use force_refresh=True to recreate on 403 errors."""
+    """Get or create the trading client. Use force_refresh=True to recreate on errors."""
     global _trading_client
     if _trading_client is None or force_refresh:
         if not PRIVATE_KEY or not FUNDER:
@@ -379,7 +357,7 @@ class SniperMonitor:
         self.warmed_up = False  # Skip initial stale book snapshots
         self.stopped = False
         self.last_snipe_attempt = 0  # Timestamp of last attempt
-        self.snipe_cooldown = 10  # Seconds to wait after failed attempt
+        self.snipe_cooldown = 1  # Seconds to wait after failed attempt
         
         # Current prices (updated in real-time)
         self.up_price = 0.0
@@ -795,7 +773,7 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
             add_dashboard_error(label, "403 error - refreshing credentials...")
             get_trading_client(force_refresh=True)
             return execute_snipe(opportunity, size, target_price, monitor_label, _retry=True)
-        add_dashboard_error(label, f"Exception: {error_str[:100]}")
+        add_dashboard_error(label, f"Exception: {error_str}")
         return False
 
 
@@ -879,11 +857,10 @@ def monitor_all_assets():
     """Main entry point: monitor all configured assets in parallel."""
     global _live, _all_connected
 
-    # Startup banner (works in both modes)
+    # Startup banner
     print(f"\n{'='*70}")
     print(f"🎯 MULTI-ASSET 15M RESOLUTION SNIPER (WebSocket)")
     print(f"{'='*70}")
-    print(f"   Mode: {'Interactive' if IS_INTERACTIVE else 'Non-interactive (journalctl)'}")
     print(f"   Assets: {', '.join(a.upper() for a in MONITORED_ASSETS)}")
     print(f"   Target prices: ${PRICE_TIERS[-1][1]:.2f} (>60s) → ${PRICE_TIERS[1][1]:.2f} (30-60s) → ${PRICE_TIERS[0][1]:.2f} (<30s)")
     print(f"\n   💰 Trading: {'ENABLED' if EXECUTE_TRADES else 'DISABLED'}")
@@ -921,19 +898,10 @@ def monitor_all_assets():
 
     # Main thread runs the display
     try:
-        if IS_INTERACTIVE:
-            # Interactive mode: use rich Live display for in-place updates
-            with Live(_build_status_table(), console=_console, refresh_per_second=2, transient=False) as live:
-                _live = live
-                while True:
-                    time.sleep(0.5)
-        else:
-            # Non-interactive mode (systemd/journalctl): print periodically
-            print("Running in non-interactive mode (journalctl). Status updates every 5 seconds.\n")
+        with Live(_build_status_table(), console=_console, refresh_per_second=2, transient=False) as live:
+            _live = live
             while True:
-                time.sleep(5)
-                with _print_lock:
-                    _print_all_status()
+                time.sleep(0.5)
     except KeyboardInterrupt:
         _live = None
         print(f"\n\n{'='*70}")

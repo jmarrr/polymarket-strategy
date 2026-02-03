@@ -3,27 +3,18 @@
 ## Project Overview
 Collection of trading bots and tools for Polymarket prediction markets, primarily focused on crypto 15-minute resolution markets.
 
+**Note**: Must run locally (residential IP required). Polymarket blocks VPS/datacenter IPs via Cloudflare.
+
 ## Key Files
 
-### Proven Working
-- `sniper.py` — Multi-asset 15m resolution sniper (BTC, ETH, SOL, XRP). WebSocket-based, monitors order books and buys when price hits target.
-- `dashboard.py` — Flask web dashboard for real-time monitoring
-
-### Currently Testing
-- `overreaction.py` — Overreaction strategy (experimental)
-
-## Deployment Files
-- `setup.sh` — One-command server setup script
-- `sniper.service` — systemd service for auto-restart
-- `requirements.txt` — Python dependencies
+- `sniper.py` — Multi-asset 15m resolution sniper (BTC, ETH, SOL, XRP). WebSocket-based, monitors order books and buys when price hits target. Includes built-in web dashboard on port 5000.
 
 ## Environment Variables
 - `PRIVATE_KEY` — Polygon wallet private key for signing transactions
 - `FUNDER_ADDRESS` — Funder wallet address (Safe/proxy wallet)
-- `CLOB_API_URL` — Optional override for CLOB API endpoint (defaults to `https://clob.polymarket.com`)
 
 ## APIs Used
-- **CLOB API** (`clob.polymarket.com`) — Order placement via `py_clob_client`
+- **CLOB API** (`clob.polymarket.com`) — Order placement and order book queries via `py_clob_client`
 - **Gamma API** (`gamma-api.polymarket.com`) — Market/event discovery by slug
 - **WebSocket** (`ws-subscriptions-clob.polymarket.com`) — Real-time order book updates
 
@@ -31,7 +22,8 @@ Collection of trading bots and tools for Polymarket prediction markets, primaril
 - `py_clob_client` — Polymarket CLOB client (provides `ClobClient`, `OrderArgs`, `OrderType`)
 - `websocket-client` — WebSocket connections (`WebSocketApp`)
 - `requests` — HTTP calls to Gamma API
-- `flask` — Web dashboard server
+- `flask` — Web dashboard server (integrated into sniper.py)
+- `rich` — Terminal display formatting
 
 ## sniper.py Architecture
 - `SniperMonitor` class manages one market's WebSocket connection and order book state
@@ -51,7 +43,7 @@ More aggressive targets as time runs out:
 PRICE_TIERS = [
     (30, 0.85),   # <= 30s remaining: $0.85
     (60, 0.92),   # <= 60s remaining: $0.92
-    (float('inf'), 0.98),  # > 60s: $0.98 (conservative)
+    (float('inf'), 0.96),  # > 60s: $0.96 (conservative)
 ]
 ```
 
@@ -61,12 +53,26 @@ PRICE_TIERS = [
 - `MAX_TOTAL_EXPOSURE` — Maximum total USDC across all positions ($200 default)
 - `AUTO_SNIPE` — Automatically execute when opportunity found
 
-## Deployment
+## Running
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) for full step-by-step instructions.
+```bash
+# Create .env file with credentials
+PRIVATE_KEY=your_private_key
+FUNDER_ADDRESS=your_funder_address
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the sniper (dashboard auto-starts on port 5000)
+python sniper.py
+
+# Access dashboard
+http://localhost:5000
+```
 
 ## Known Gotchas
 - WebSocket initial book snapshot contains stale prices (both sides ~$0.99). The `warmed_up` flag + price sum upper bound check (`<= 1.15`) guard against this. Do not remove both protections.
 - Illiquid markets may have low price sums (e.g. $0.24). The stale check only blocks HIGH sums to allow thin books through.
 - Market slugs follow the pattern `{asset}-updown-15m-{unix_timestamp}` (e.g. `btc-updown-15m-1770034500`).
 - FOK orders fail silently if price moved — check dashboard error log for failed trades.
+- **VPS does not work** — Polymarket uses Cloudflare bot protection that blocks datacenter IPs. Must run locally with residential IP.
