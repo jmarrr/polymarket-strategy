@@ -4,3 +4,4 @@ websocket-client>=1.6.0
 requests>=2.31.0
 rich>=13.0.0
 flask>=3.0.0
+wakepy>=0.9.0
