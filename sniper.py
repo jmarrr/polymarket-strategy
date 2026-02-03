@@ -459,20 +459,28 @@ class SniperMonitor:
 
                 if opportunity:
                     if EXECUTE_TRADES and AUTO_SNIPE:
-                        # Check if already sniped BEFORE attempting trade
+                        # Check if already sniped or currently attempting
                         with _trade_lock:
                             if self.snipe_executed:
                                 status += "✅ SNIPED!"
                                 _update_asset_status(self.asset_label, status)
                                 return
-                            self.snipe_executed = True
+                            if hasattr(self, '_attempting_snipe') and self._attempting_snipe:
+                                status += "Waiting for target price"
+                                _update_asset_status(self.asset_label, status)
+                                return
+                            self._attempting_snipe = True
 
-                        success = execute_snipe(opportunity, target_price=target, monitor_label=self.asset_label)
-                        if success:
-                            status += "✅ SNIPED!"
-                        else:
-                            self.snipe_executed = False
-                            status += "Waiting for target price"
+                        try:
+                            success = execute_snipe(opportunity, target_price=target, monitor_label=self.asset_label)
+                            if success:
+                                with _trade_lock:
+                                    self.snipe_executed = True
+                                status += "✅ SNIPED!"
+                            else:
+                                status += "Waiting for target price"
+                        finally:
+                            self._attempting_snipe = False
                         _update_asset_status(self.asset_label, status)
                     elif EXECUTE_TRADES:
                         status += f"🎯 {opportunity['side']} @ ${opportunity['price']:.2f}"
