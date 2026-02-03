@@ -437,27 +437,58 @@ class SniperMonitor:
             pass
     
     def process_message(self, data):
-        """Process order book update message - just trigger check, REST provides prices."""
-        # WebSocket just signals that something changed
-        # We fetch actual prices from REST in check_snipe_opportunity
-        has_activity = False
-
+        """Process order book update message."""
         # Handle dict format (price_changes messages)
         if isinstance(data, dict):
-            if data.get("price_changes"):
-                has_activity = True
+            price_changes = data.get("price_changes", [])
+            for change in price_changes:
+                asset_id = change.get("asset_id")
+                side = change.get("side")
+                price = change.get("price")
+                size = change.get("size")
 
-        # Handle list format (initial book snapshots or price changes)
-        elif isinstance(data, list):
-            for event in data:
-                event_type = event.get("event_type")
-                if event_type in ("book", "price_change"):
-                    has_activity = True
-                    break
+                if asset_id and side and price is not None:
+                    if asset_id not in self.orderbooks:
+                        self.orderbooks[asset_id] = {"bids": [], "asks": []}
+                    book_side = "bids" if side == "BUY" else "asks"
+                    self.update_book_level(asset_id, book_side, price, size)
 
-        # Trigger check if there was activity (REST will fetch fresh prices)
-        if has_activity:
-            self.check_snipe_opportunity()
+            if price_changes:
+                self.warmed_up = True
+                self.check_snipe_opportunity()
+            return
+
+        # Handle list format (initial book snapshots)
+        if not isinstance(data, list):
+            return
+
+        for event in data:
+            event_type = event.get("event_type")
+            asset_id = event.get("asset_id")
+
+            if event_type == "book" and asset_id:
+                self.orderbooks[asset_id] = {
+                    "bids": event.get("bids", []),
+                    "asks": event.get("asks", [])
+                }
+                self.check_snipe_opportunity()
+
+            elif event_type == "price_change" and asset_id:
+                if asset_id not in self.orderbooks:
+                    self.orderbooks[asset_id] = {"bids": [], "asks": []}
+
+                changes = event.get("changes", [])
+                for change in changes:
+                    side = change.get("side")
+                    price = change.get("price")
+                    size = change.get("size")
+
+                    if side and price is not None:
+                        book_side = "bids" if side == "BUY" else "asks"
+                        self.update_book_level(asset_id, book_side, price, size)
+
+                self.warmed_up = True
+                self.check_snipe_opportunity()
     
     def update_book_level(self, asset_id: str, side: str, price: str, size: str):
         """Update a single price level in the order book."""
@@ -478,19 +509,15 @@ class SniperMonitor:
         self.orderbooks[asset_id] = book
     
     def check_snipe_opportunity(self):
-        """Check for snipe opportunity using REST API prices (source of truth)."""
+        """Check for snipe opportunity using WebSocket prices (REST verifies before trade)."""
         self.update_count += 1
 
         if not self.up_token or not self.down_token:
             return
 
-        # Fetch fresh prices from REST API (source of truth)
-        # This eliminates WebSocket drift issues
-        up_book = get_order_book(self.up_token)
-        down_book = get_order_book(self.down_token)
-
-        if not up_book or not down_book:
-            return
+        # Use WebSocket orderbook for display (fast, no rate limits)
+        up_book = self.orderbooks.get(self.up_token, {})
+        down_book = self.orderbooks.get(self.down_token, {})
 
         up_asks = up_book.get("asks", [])
         down_asks = down_book.get("asks", [])
@@ -498,12 +525,11 @@ class SniperMonitor:
         if not up_asks or not down_asks:
             return
 
-        # Update current prices from REST
+        # Update current prices from WebSocket
         self.up_price = float(up_asks[0]["price"])
         self.up_size = float(up_asks[0]["size"])
         self.down_price = float(down_asks[0]["price"])
         self.down_size = float(down_asks[0]["size"])
-        self.warmed_up = True  # REST data is always valid
         
         # Build countdown MM:SS from slug's interval end (matches Polymarket server time)
         total_secs = max(0, self.interval_end_unix - int(time.time()))
@@ -671,24 +697,20 @@ class SniperMonitor:
 
         threading.Thread(target=refresh_loop, daemon=True).start()
 
-        # Start periodic REST API sync to correct WebSocket drift
-        # REST is source of truth - use it exclusively now
+        # Periodic REST sync to correct WebSocket drift (every 10 seconds)
         def sync_loop():
             while self.running:
                 try:
-                    time.sleep(2)  # More frequent sync
+                    time.sleep(10)  # Less frequent to avoid rate limits
                     if not self.running:
                         break
-                    # Fetch fresh data from REST (source of truth)
+                    # Sync orderbook from REST to fix any drift
                     up_book = get_order_book(self.up_token) if self.up_token else None
                     down_book = get_order_book(self.down_token) if self.down_token else None
                     if up_book and down_book:
-                        # Completely replace with REST data
                         self.orderbooks[self.up_token] = up_book
                         self.orderbooks[self.down_token] = down_book
-                        # Mark as warmed up since we have fresh REST data
                         self.warmed_up = True
-                    self.check_snipe_opportunity()
                 except:
                     pass
 
