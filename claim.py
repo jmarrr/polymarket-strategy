@@ -34,7 +34,8 @@ MIN_REDEEM_SIZE = 1
 async def get_redeemable_positions(data_client, user_address: str) -> list:
     """Fetch all redeemable positions for user."""
     try:
-        positions = await data_client.get_positions(
+        # get_positions returns a list directly (not a coroutine)
+        positions = data_client.get_positions(
             user=user_address,
             redeemable=True,
             size_threshold=MIN_REDEEM_SIZE,
