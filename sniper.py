@@ -43,7 +43,7 @@ MONITORED_ASSETS = ["bitcoin", "ethereum", "solana", "xrp"]
 PRICE_TIERS = [
     (30, 0.85),   # <= 30s: $0.85 (aggressive)
     (60, 0.92),   # <= 60s: $0.92 (medium)
-    (float('inf'), 0.96),  # > 60s: $0.98 (conservative)
+    (float('inf'), 0.96),  # > 60s: $0.96 (conservative)
 ]
 
 
@@ -76,6 +76,7 @@ _all_connected = False
 # Position tracking
 _positions = {}  # {asset: {"side": str, "size": int, "price": float, "cost": float}}
 _total_exposure = 0.0
+_position_lock = threading.Lock()
 MAX_TOTAL_EXPOSURE = 200  # Maximum total USDC across all positions
 
 # Trade logger
@@ -114,20 +115,23 @@ def log_trade(asset: str, side: str, price: float, size: int, success: bool, ord
 
 def can_open_position(cost: float) -> bool:
     """Check if we can open a position without exceeding max exposure."""
-    return (_total_exposure + cost) <= MAX_TOTAL_EXPOSURE
+    with _position_lock:
+        return (_total_exposure + cost) <= MAX_TOTAL_EXPOSURE
 
 
 def record_position(asset: str, side: str, size: int, price: float):
     """Record a new position."""
     global _total_exposure
-    cost = size * price
-    _positions[asset] = {"side": side, "size": size, "price": price, "cost": cost}
-    _total_exposure += cost
+    with _position_lock:
+        cost = size * price
+        _positions[asset] = {"side": side, "size": size, "price": price, "cost": cost}
+        _total_exposure += cost
 
 
 def get_total_exposure() -> float:
     """Get current total exposure across all positions."""
-    return _total_exposure
+    with _position_lock:
+        return _total_exposure
 
 
 def _refresh_status():
@@ -487,7 +491,7 @@ class SniperMonitor:
                             success = execute_snipe(opportunity, target_price=target, monitor_label=self.asset_label)
                             if success:
                                 self.snipe_executed = True
-                                status = f"[{self.asset_label}]".ljust(12) + f"⏱ {self.countdown_display} | 🎯 ${target:.2f} | UP: ${self.up_price:.2f} | DOWN: ${self.down_price:.2f} | ✅ SNIPED!"
+                                status = f"[{self.asset_label}]".ljust(12) + f"⏱️ {mins:02d}:{secs:02d} | 🎯 ${target:.2f} | UP: ${self.up_price:.2f} | DOWN: ${self.down_price:.2f} | ✅ SNIPED!"
                                 _update_asset_status(self.asset_label, status)
                     else:
                         _update_asset_status(self.asset_label, f"[{self.asset_label}]".ljust(12) + "| ⚠️ Trading disabled")
@@ -676,7 +680,9 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
             return False
 
         # Verify REST price also meets target (don't trust WebSocket alone)
-        if best_ask_price < target_price:
+        # Use same epsilon as WebSocket check for consistency
+        epsilon = 0.005
+        if best_ask_price < (target_price - epsilon):
             return False
 
         price = round(best_ask_price, 2)
