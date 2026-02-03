@@ -53,8 +53,12 @@ async def redeem_position(web3_client, position) -> bool:
         # Position is a Pydantic model, access as attributes
         condition_id = getattr(position, "conditionId", None) or getattr(position, "condition_id", None)
         size = int(float(getattr(position, "size", 0)))
-        outcome_index = getattr(position, "outcomeIndex", 0) or getattr(position, "outcome_index", 0)
-        neg_risk = getattr(position, "negativeRisk", False) or getattr(position, "negative_risk", False)
+        outcome_index = getattr(position, "outcomeIndex", None)
+        if outcome_index is None:
+            outcome_index = getattr(position, "outcome_index", 0)
+        neg_risk = getattr(position, "negRisk", None)
+        if neg_risk is None:
+            neg_risk = getattr(position, "neg_risk", False)
         title = str(getattr(position, "title", "Unknown"))[:40]
 
         if size <= 0:
@@ -69,11 +73,22 @@ async def redeem_position(web3_client, position) -> bool:
 
         logger.info(f"Redeeming: {title} | {size} shares")
 
-        tx_hash = await web3_client.redeem(
-            condition_id=condition_id,
-            amounts=amounts,
-            neg_risk=neg_risk
-        )
+        # Try different redeem methods based on what's available
+        if hasattr(web3_client, 'redeem_positions'):
+            tx_hash = await web3_client.redeem_positions(
+                condition_id=condition_id,
+                amounts=amounts,
+            )
+        elif hasattr(web3_client, 'redeem'):
+            tx_hash = await web3_client.redeem(
+                condition_id=condition_id,
+                amounts=amounts,
+            )
+        else:
+            # List available methods for debugging
+            methods = [m for m in dir(web3_client) if not m.startswith('_')]
+            logger.error(f"  -> No redeem method found. Available: {methods[:20]}")
+            return False
 
         logger.info(f"  -> Success! TX: {tx_hash}")
         return True
