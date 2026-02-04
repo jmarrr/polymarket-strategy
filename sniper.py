@@ -369,7 +369,8 @@ class SniperMonitor:
         self.stopped = False
         self.last_snipe_attempt = 0  # Timestamp of last attempt
         self.snipe_cooldown = 1  # Seconds to wait after failed attempt
-        
+        self._attempting_snipe = False  # Flag to prevent concurrent snipe attempts
+
         # Current prices (updated in real-time)
         self.up_price = 0.0
         self.up_size = 0.0
@@ -545,7 +546,7 @@ class SniperMonitor:
                                 status += "✅ SNIPED!"
                                 _update_asset_status(self.asset_label, status)
                                 return
-                            if hasattr(self, '_attempting_snipe') and self._attempting_snipe:
+                            if self._attempting_snipe:
                                 _update_asset_status(self.asset_label, status)
                                 return
                             # Check cooldown after failed attempts
@@ -847,11 +848,7 @@ def monitor_asset(asset: str):
                 market = open_markets[0]
                 _update_asset_status(label, f"[{label}]".ljust(12) + f"| ✅ Found market, connecting...")
 
-                # Extract end time from slug timestamp (start + 15min)
-                slug_timestamp = int(slug.split("-")[-1])
-                interval_end_unix = slug_timestamp + 900  # 15 minutes
-
-                # Start WebSocket monitor
+                # Start WebSocket monitor (interval_end_unix already calculated above)
                 monitor = SniperMonitor(market, asset_label=label, interval_end_unix=interval_end_unix)
                 ws_thread = threading.Thread(target=monitor.run, daemon=True)
                 ws_thread.start()
