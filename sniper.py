@@ -514,9 +514,9 @@ class SniperMonitor:
         )
 
         # Sanity check: stale snapshots show both sides ~$0.99 (sum ~$1.98)
-        # Only block high sums; low sums from thin/illiquid books are fine
+        # Also check both prices > 0 (WebSocket sometimes shows $0.00 incorrectly)
         price_sum = self.up_price + self.down_price
-        prices_valid = price_sum <= 1.15
+        prices_valid = price_sum <= 1.15 and self.up_price > 0 and self.down_price > 0
 
         # Update dashboard data
         timer_str = f"{mins:02d}:{secs:02d}"
@@ -534,7 +534,10 @@ class SniperMonitor:
             if not self.warmed_up:
                 status += "⏳ Warming up"
             elif not prices_valid:
-                status += f"⚠️ Stale (sum=${price_sum:.2f})"
+                if self.up_price == 0 or self.down_price == 0:
+                    status += "⚠️ Invalid ($0 price)"
+                else:
+                    status += f"⚠️ Stale (sum=${price_sum:.2f})"
             else:
                 opportunity = self.get_best_opportunity(target)
 
