@@ -30,7 +30,7 @@ Collection of trading bots and tools for Polymarket prediction markets, primaril
 - `monitor_asset()` runs per-asset in its own thread, handles interval transitions
 - `monitor_all_assets()` spawns threads for all configured assets
 - **Stale data protection**: `warmed_up` flag skips initial snapshots; price sum check (`<= 1.15`) blocks stale data where both UP+DOWN show ~$0.99
-- **FOK orders**: Fill-or-Kill orders ensure full position or nothing - no partial fills
+- **FAK orders**: Fill-and-Kill orders fill available liquidity, cancel unfilled portion (partial fills OK)
 - **Auto-reconnect**: Exponential backoff on WebSocket disconnect
 - **Thread safety**: `_trade_lock` for order execution, `_print_lock` for console output
 - **Dashboard integration**: Shares data with web dashboard via `_dashboard_data` dict
@@ -74,5 +74,5 @@ http://localhost:5000
 - WebSocket initial book snapshot contains stale prices (both sides ~$0.99). The `warmed_up` flag + price sum upper bound check (`<= 1.15`) guard against this. Do not remove both protections.
 - Illiquid markets may have low price sums (e.g. $0.24). The stale check only blocks HIGH sums to allow thin books through.
 - Market slugs follow the pattern `{asset}-updown-15m-{unix_timestamp}` (e.g. `btc-updown-15m-1770034500`).
-- FOK orders fail if liquidity is insufficient — check dashboard error log for failed trades.
+- FAK orders may partially fill if liquidity is limited — check dashboard for actual fill amounts.
 - **VPS does not work** — Polymarket uses Cloudflare bot protection that blocks datacenter IPs. Must run locally with residential IP.

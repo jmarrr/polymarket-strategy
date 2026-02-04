@@ -717,7 +717,7 @@ class SniperMonitor:
 
 
 def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.98, monitor_label: str = None, _retry: bool = False) -> bool:
-    """Execute snipe trade using WebSocket prices. FOK order ensures full fill or nothing."""
+    """Execute snipe trade using WebSocket prices. FAK order allows partial fills."""
     label = monitor_label or "UNKNOWN"
 
     if not EXECUTE_TRADES:
@@ -731,7 +731,7 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
     try:
         client = get_trading_client()
 
-        # Use WebSocket price directly - FOK will fail if liquidity insufficient
+        # Use WebSocket price directly - FAK fills available, cancels rest
         price = round(opportunity["price"], 2)
 
         # Calculate position size
@@ -766,7 +766,7 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
 
         with _trade_lock:
             signed_order = client.create_order(order)
-            result = client.post_order(signed_order, OrderType.FOK)
+            result = client.post_order(signed_order, OrderType.FAK)
 
         success = result.get("success", False)
         order_id = result.get("orderID", "")
