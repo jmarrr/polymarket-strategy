@@ -370,6 +370,8 @@ class SniperMonitor:
         self.last_snipe_attempt = 0  # Timestamp of last attempt
         self.snipe_cooldown = 1  # Seconds to wait after failed attempt
         self._attempting_snipe = False  # Flag to prevent concurrent snipe attempts
+        self._bad_price_count = 0  # Counter for unrealistic price sums
+        self._last_resync = 0  # Timestamp of last resync attempt
 
         # Current prices (updated in real-time)
         self.up_price = 0.0
@@ -513,10 +515,19 @@ class SniperMonitor:
             f"DOWN: ${self.down_price:.2f} ({int(self.down_size)}) | "
         )
 
-        # Sanity check: stale snapshots show both sides ~$0.99 (sum ~$1.98)
-        # Also check both prices > 0 (WebSocket sometimes shows $0.00 incorrectly)
+        # Sanity check: binary market prices should sum to ~$1.00
+        # Too high (>1.15) = stale snapshot, too low (<0.80) = incomplete data
         price_sum = self.up_price + self.down_price
-        prices_valid = price_sum <= 1.15 and self.up_price > 0 and self.down_price > 0
+        prices_valid = 0.80 <= price_sum <= 1.15 and self.up_price > 0 and self.down_price > 0
+
+        # Auto-resync if price sum is unrealistic for too long
+        if self.warmed_up and not prices_valid and self.up_price > 0 and self.down_price > 0:
+            self._bad_price_count += 1
+            # Resync after 3 consecutive bad readings, max once per 10 seconds
+            if self._bad_price_count >= 3 and (time.time() - self._last_resync) > 10:
+                self.resync_orderbook()
+        else:
+            self._bad_price_count = 0
 
         # Update dashboard data
         timer_str = f"{mins:02d}:{secs:02d}"
@@ -536,6 +547,8 @@ class SniperMonitor:
             elif not prices_valid:
                 if self.up_price == 0 or self.down_price == 0:
                     status += "⚠️ Invalid ($0 price)"
+                elif price_sum < 0.80:
+                    status += f"⚠️ Incomplete (sum=${price_sum:.2f})"
                 else:
                     status += f"⚠️ Stale (sum=${price_sum:.2f})"
             else:
@@ -674,6 +687,26 @@ class SniperMonitor:
                     pass
 
         threading.Thread(target=refresh_loop, daemon=True).start()
+
+    def resync_orderbook(self):
+        """Re-subscribe to get fresh orderbook data."""
+        if not self.ws or not self.running:
+            return
+        try:
+            # Clear current orderbook
+            self.orderbooks = {}
+            self.warmed_up = False
+            self._bad_price_count = 0
+            self._last_resync = time.time()
+            # Re-send subscription
+            subscribe_msg = {
+                "assets_ids": [self.up_token, self.down_token],
+                "type": "market"
+            }
+            self.ws.send(json.dumps(subscribe_msg))
+            _update_asset_status(self.asset_label, f"[{self.asset_label}]".ljust(12) + "| 🔄 Resyncing orderbook...")
+        except Exception:
+            pass
 
     def run(self):
         """Start the WebSocket connection with auto-reconnect."""
