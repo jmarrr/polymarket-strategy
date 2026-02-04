@@ -712,6 +712,11 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
     if not EXECUTE_TRADES:
         return False
 
+    # Check liquidity before doing anything
+    available = int(opportunity.get("size", 0))
+    if available < 1:
+        return False
+
     try:
         client = get_trading_client()
 
@@ -728,7 +733,6 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
             size = min_shares
 
         # Cap by available liquidity from WebSocket
-        available = int(opportunity["size"])
         if size > available:
             size = available
 
