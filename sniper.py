@@ -162,6 +162,16 @@ def get_total_exposure() -> float:
         return _total_exposure
 
 
+def clear_position(asset: str):
+    """Clear position for an asset when interval resolves."""
+    global _total_exposure
+    with _position_lock:
+        if asset in _positions:
+            cost = _positions[asset].get("cost", 0)
+            _total_exposure = max(0, _total_exposure - cost)
+            del _positions[asset]
+
+
 def _build_status_table() -> Table:
     """Build a rich table from current asset status."""
     table = Table(show_header=False, box=None, padding=(0, 1))
@@ -742,6 +752,7 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         # Check position limit
         cost = size * price
         if not can_open_position(cost):
+            add_dashboard_error(label, f"Max exposure reached (${get_total_exposure():.0f}/${MAX_TOTAL_EXPOSURE})")
             return False
 
         # Create and execute order
@@ -794,6 +805,9 @@ def monitor_asset(asset: str):
 
             # Check if we moved to a new interval
             if slug != current_slug:
+                # Clear position from previous interval (it has resolved)
+                clear_position(label)
+
                 # Stop old monitor
                 if monitor:
                     monitor.stop()
