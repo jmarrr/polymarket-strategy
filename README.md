@@ -1,6 +1,6 @@
 # Polymarket 15-Minute Sniper
 
-Automated trading bot for Polymarket 15-minute crypto resolution markets. Monitors BTC, ETH, SOL, and XRP order books via WebSocket and executes trades when prices hit target thresholds.
+Automated trading bot for Polymarket 15-minute crypto resolution markets. Monitors BTC, ETH, and SOL order books via WebSocket and executes trades when prices hit target thresholds.
 
 **Must run locally** - Polymarket blocks VPS/datacenter IPs via Cloudflare.
 
@@ -8,7 +8,18 @@ Automated trading bot for Polymarket 15-minute crypto resolution markets. Monito
 
 ### 1. Install Dependencies
 
+**Windows:**
 ```bash
+pip install -r requirements.txt
+```
+
+**Linux/macOS:**
+```bash
+# Create virtual environment (recommended)
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
@@ -35,8 +46,15 @@ AUTO_SNIPE = True           # Auto-execute when opportunity found
 
 ## Running
 
+**Windows:**
 ```bash
 python sniper.py
+```
+
+**Linux/macOS:**
+```bash
+source venv/bin/activate  # if using virtual environment
+python3 sniper.py
 ```
 
 The bot will:
@@ -54,13 +72,12 @@ Access at `http://localhost:5000` to view:
 
 ## Price Targets
 
-Targets adjust based on time remaining:
+Only trades in the final minute before resolution:
 
 | Time Left | Target |
 |-----------|--------|
-| > 60s     | $0.98  |
-| 30-60s    | $0.92  |
-| < 30s     | $0.85  |
+| < 60s     | $0.96  |
+| >= 60s    | Waiting (no trading) |
 
 ## Logs
 
