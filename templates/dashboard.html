@@ -233,11 +233,19 @@
                 'sniped': ['SNIPED', 'status-sniped'],
                 'monitoring': ['Monitoring', 'status-monitoring'],
                 'warming': ['Warming Up', 'status-warming'],
+                'waiting': ['Waiting', 'status-warming'],
                 'stale': ['Stale Data', 'status-stale'],
                 'cooldown': ['Cooldown', 'status-stale']
             };
             const [text, cls] = statusMap[status] || [status, ''];
             return `<span class="${cls}">${text}</span>`;
+        }
+
+        function formatTarget(target) {
+            if (!target || target <= 0) {
+                return '<span class="price price-low">---</span>';
+            }
+            return `<span class="price">$${target.toFixed(2)}</span>`;
         }
 
         function updateDashboard(data) {
@@ -267,7 +275,7 @@
                         <tr>
                             <td><strong>${name}</strong></td>
                             <td>${formatTimer(asset.timer)}</td>
-                            <td class="price">$${asset.target.toFixed(2)}</td>
+                            <td>${formatTarget(asset.target)}</td>
                             <td>${formatPriceWithSize(asset.up_price, asset.up_size, asset.target)}</td>
                             <td>${formatPriceWithSize(asset.down_price, asset.down_size, asset.target)}</td>
                             <td>${formatStatus(asset.status)}</td>
@@ -311,21 +319,28 @@
             }
         }
 
+        let failCount = 0;
+
         async function fetchStatus() {
             try {
                 const response = await fetch('/api/status');
                 const data = await response.json();
                 updateDashboard(data);
+                failCount = 0;
             } catch (error) {
                 console.error('Failed to fetch status:', error);
+                failCount++;
+                if (failCount >= 3) {
+                    document.getElementById('updated').textContent = 'Connection lost - retrying...';
+                }
             }
         }
 
         // Initial fetch
         fetchStatus();
 
-        // Refresh every 2 seconds
-        setInterval(fetchStatus, 2000);
+        // Refresh every 1 second for more responsive updates
+        setInterval(fetchStatus, 1000);
     </script>
 </body>
 </html>
