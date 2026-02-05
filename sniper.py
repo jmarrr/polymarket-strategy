@@ -65,7 +65,7 @@ def get_target_price(seconds_remaining: int) -> float:
 
 # Trading Configuration
 EXECUTE_TRADES = True  # Set to True to enable actual trading
-MAX_POSITION_SIZE = 50 # Maximum USDC per trade
+MAX_POSITION_SIZE = 100 # Maximum USDC per trade
 AUTO_SNIPE = True  # Automatically execute when opportunity found
 
 # Global trading client
@@ -90,7 +90,7 @@ _all_connected = False
 _positions = {}  # {asset: {"side": str, "size": int, "price": float, "cost": float}}
 _total_exposure = 0.0
 _position_lock = threading.Lock()
-MAX_TOTAL_EXPOSURE = 200  # Maximum total USDC across all positions
+MAX_TOTAL_EXPOSURE = 500  # Maximum total USDC across all positions
 
 # Trade logger
 _trade_logger = None
@@ -551,6 +551,9 @@ class SniperMonitor:
                     status += f"⚠️ Incomplete (sum=${price_sum:.2f})"
                 else:
                     status += f"⚠️ Stale (sum=${price_sum:.2f})"
+            elif total_secs > 360:
+                # Don't trade when more than 6 minutes remaining
+                status += "⏳ Waiting (<6min)"
             else:
                 opportunity = self.get_best_opportunity(target)
 
