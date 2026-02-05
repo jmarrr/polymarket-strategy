@@ -48,11 +48,8 @@ FUNDER = os.getenv("FUNDER_ADDRESS")
 MONITORED_ASSETS = ["bitcoin", "ethereum", "solana", "xrp"]
 
 # Time-based target price tiers (seconds_threshold, target_price)
-# More aggressive as time runs out
 PRICE_TIERS = [
-    (30, 0.85),   # <= 30s: $0.85 (aggressive)
-    (60, 0.92),   # <= 60s: $0.92 (medium)
-    (float('inf'), 0.96),  # > 60s: $0.96 (conservative)
+    (60, 0.96),   # <= 60s (1min): $0.96
 ]
 
 
@@ -551,9 +548,6 @@ class SniperMonitor:
                     status += f"⚠️ Incomplete (sum=${price_sum:.2f})"
                 else:
                     status += f"⚠️ Stale (sum=${price_sum:.2f})"
-            elif total_secs > 360:
-                # Don't trade when more than 6 minutes remaining
-                status += "⏳ Waiting (<6min)"
             else:
                 opportunity = self.get_best_opportunity(target)
 
