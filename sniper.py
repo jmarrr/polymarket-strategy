@@ -48,7 +48,8 @@ MONITORED_ASSETS = ["bitcoin", "ethereum", "solana", "xrp"]
 
 # Time-based target price tiers (seconds_threshold, target_price)
 PRICE_TIERS = [
-    (90, 0.96),   # < 60s (1min): $0.96
+    (120, 0.96),   # < 60s (2min): $0.96
+    (300, 0.96),   # < 300s (5min): $0.98
 ]
 
 
@@ -525,8 +526,13 @@ class SniperMonitor:
         price_sum = self.up_price + self.down_price
         prices_valid = 0.80 <= price_sum <= 1.15 and self.up_price > 0 and self.down_price > 0
 
-        # Auto-resync if price sum is unrealistic for too long
-        if self.warmed_up and not prices_valid and self.up_price > 0 and self.down_price > 0:
+        # Also invalid: one side $0 but other side not near $1.00 (stale partial data)
+        if (self.up_price == 0 and self.down_price > 0 and self.down_price < 0.95) or \
+           (self.down_price == 0 and self.up_price > 0 and self.up_price < 0.95):
+            prices_valid = False
+
+        # Auto-resync if prices are invalid for too long
+        if self.warmed_up and not prices_valid:
             self._bad_price_count += 1
             # Resync after 3 consecutive bad readings, max once per 10 seconds
             if self._bad_price_count >= 3 and (time.time() - self._last_resync) > 10:
