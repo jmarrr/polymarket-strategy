@@ -48,16 +48,16 @@ MONITORED_ASSETS = ["bitcoin", "ethereum", "solana", "xrp"]
 
 # Time-based target price tiers (seconds_threshold, target_price)
 PRICE_TIERS = [
-    (60, 0.96),   # <= 60s (1min): $0.96
+    (60, 0.96),   # < 60s (1min): $0.96
 ]
 
 
 def get_target_price(seconds_remaining: int) -> float:
     """Get target price based on time remaining until resolution."""
     for threshold, price in PRICE_TIERS:
-        if seconds_remaining <= threshold:
+        if seconds_remaining < threshold:
             return price
-    return 0.98  # Fallback
+    return 0.98  # Fallback (not actively trading)
 
 # Trading Configuration
 EXECUTE_TRADES = True  # Set to True to enable actual trading
@@ -902,7 +902,7 @@ def monitor_all_assets():
     print(f"🎯 MULTI-ASSET 15M RESOLUTION SNIPER (WebSocket)")
     print(f"{'='*70}")
     print(f"   Assets: {', '.join(a.upper() for a in MONITORED_ASSETS)}")
-    print(f"   Target: ${PRICE_TIERS[0][1]:.2f} (when <={PRICE_TIERS[0][0]}s remaining)")
+    print(f"   Target: ${PRICE_TIERS[0][1]:.2f} (when <{PRICE_TIERS[0][0]}s remaining)")
     print(f"\n   💰 Trading: {'ENABLED' if EXECUTE_TRADES else 'DISABLED'}")
     if EXECUTE_TRADES:
         print(f"   📊 Max position: ${MAX_POSITION_SIZE} per trade")
