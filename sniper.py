@@ -44,7 +44,7 @@ FUNDER = os.getenv("FUNDER_ADDRESS")
 
 
 # Strategy Configuration
-MONITORED_ASSETS = ["bitcoin", "ethereum", "solana", "xrp"]
+MONITORED_ASSETS = ["bitcoin", "ethereum", "solana"]
 
 # Time-based target price tiers (seconds_threshold, target_price)
 PRICE_TIERS = [
