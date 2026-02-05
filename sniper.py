@@ -523,10 +523,12 @@ class SniperMonitor:
 
         # Sanity check: binary market prices should sum to ~$1.00
         price_sum = self.up_price + self.down_price
-        prices_valid = 0.80 <= price_sum <= 1.15 and self.up_price > 0 and self.down_price > 0
+        prices_valid = 0.95 <= price_sum <= 1.05 and self.up_price > 0 and self.down_price > 0
 
-        # Auto-resync if prices are invalid (throttle to once per 3)
-        if self.warmed_up and not prices_valid and (time.time() - self._last_resync) > 3:
+        # Auto-resync if prices are invalid (throttle to once per 3s)
+        # Also resync every 30s regardless to catch silent WebSocket stalls
+        time_since_resync = time.time() - self._last_resync
+        if self.warmed_up and (not prices_valid and time_since_resync > 3) or (time_since_resync > 30):
             self.resync_orderbook()
 
         # Update dashboard data
