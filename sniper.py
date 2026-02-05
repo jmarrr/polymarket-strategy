@@ -41,6 +41,7 @@ GAMMA_HOST = "https://gamma-api.polymarket.com"
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com"
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 FUNDER = os.getenv("FUNDER_ADDRESS")
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "5000"))
 
 
 # Strategy Configuration
@@ -1002,7 +1003,7 @@ def main():
     # Start dashboard server in background thread
     dashboard_thread = threading.Thread(
         target=start_dashboard_server,
-        kwargs={'host': '0.0.0.0', 'port': 5000},
+        kwargs={'host': '0.0.0.0', 'port': DASHBOARD_PORT},
         daemon=True
     )
     dashboard_thread.start()
