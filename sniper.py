@@ -360,7 +360,6 @@ class SniperMonitor:
         self.ws = None
         self.running = False
         self.snipe_executed = False
-        self.update_count = 0
         self.warmed_up = False  # Skip initial stale book snapshots
         self.stopped = False
         self.last_snipe_attempt = 0  # Timestamp of last attempt
@@ -471,8 +470,6 @@ class SniperMonitor:
     
     def check_snipe_opportunity(self):
         """Check for snipe opportunity using WebSocket prices (REST verifies before trade)."""
-        self.update_count += 1
-
         if not self.up_token or not self.down_token:
             return
 
@@ -595,7 +592,6 @@ class SniperMonitor:
                                 _update_asset_status(self.asset_label, status)
                     else:
                         _update_asset_status(self.asset_label, f"[{self.asset_label}]".ljust(12) + "| ⚠️ Trading disabled")
-                        self.snipe_executed = True
                     return
         elif self.snipe_executed:
             status += "✅ SNIPED!"
@@ -615,8 +611,6 @@ class SniperMonitor:
                 "token_id": self.up_token,
                 "price": self.up_price,
                 "size": self.up_size,
-                "profit_per_share": 1.0 - self.up_price,
-                "roi_percent": ((1.0 - self.up_price) / self.up_price) * 100,
             })
 
         if self.down_price >= (target_price - epsilon) and self.down_size > 0:
@@ -626,8 +620,6 @@ class SniperMonitor:
                 "token_id": self.down_token,
                 "price": self.down_price,
                 "size": self.down_size,
-                "profit_per_share": 1.0 - self.down_price,
-                "roi_percent": ((1.0 - self.down_price) / self.down_price) * 100,
             })
         
         if not opportunities:
