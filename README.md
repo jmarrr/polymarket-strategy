@@ -62,10 +62,6 @@ Targets adjust based on time remaining:
 | 30-60s    | $0.92  |
 | < 30s     | $0.85  |
 
-## Sleep Prevention
-
-The script automatically prevents Windows from sleeping while running. You can close your laptop lid and the bot will keep running (keep it plugged in).
-
 ## Logs
 
 Trade history saved to `logs/trades.log`

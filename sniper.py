@@ -32,7 +32,6 @@ from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
-from wakepy import keep
 
 load_dotenv()
 
@@ -1004,9 +1003,8 @@ def main():
     )
     dashboard_thread.start()
 
-    # Run with sleep prevention (keeps system awake while script runs)
-    with keep.running():
-        monitor_all_assets()
+    # Run the main monitoring loop
+    monitor_all_assets()
 
 
 if __name__ == "__main__":
