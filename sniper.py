@@ -522,23 +522,12 @@ class SniperMonitor:
         )
 
         # Sanity check: binary market prices should sum to ~$1.00
-        # Too high (>1.15) = stale snapshot, too low (<0.80) = incomplete data
         price_sum = self.up_price + self.down_price
         prices_valid = 0.80 <= price_sum <= 1.15 and self.up_price > 0 and self.down_price > 0
 
-        # Also invalid: one side $0 but other side not near $1.00 (stale partial data)
-        if (self.up_price == 0 and self.down_price > 0 and self.down_price < 0.95) or \
-           (self.down_price == 0 and self.up_price > 0 and self.up_price < 0.95):
-            prices_valid = False
-
-        # Auto-resync if prices are invalid for too long
-        if self.warmed_up and not prices_valid:
-            self._bad_price_count += 1
-            # Resync after 3 consecutive bad readings, max once per 10 seconds
-            if self._bad_price_count >= 3 and (time.time() - self._last_resync) > 10:
-                self.resync_orderbook()
-        else:
-            self._bad_price_count = 0
+        # Auto-resync if prices are invalid (throttle to once per 3)
+        if self.warmed_up and not prices_valid and (time.time() - self._last_resync) > 3:
+            self.resync_orderbook()
 
         # Update dashboard data
         timer_str = f"{mins:02d}:{secs:02d}"
