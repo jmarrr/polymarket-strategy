@@ -617,8 +617,9 @@ class SniperMonitor:
         opportunities = []
 
         # Use small epsilon to match display rounding (0.9795 displays as $0.98)
+        # Skip if price is 0 (no liquidity on that side)
         epsilon = 0.005
-        if self.up_price >= (target_price - epsilon) and self.up_size > 0:
+        if self.up_price > 0 and self.up_price >= (target_price - epsilon) and self.up_size > 0:
             opportunities.append({
                 "side": "UP",
                 "outcome": self.outcomes[self.up_idx],
@@ -627,7 +628,7 @@ class SniperMonitor:
                 "size": self.up_size,
             })
 
-        if self.down_price >= (target_price - epsilon) and self.down_size > 0:
+        if self.down_price > 0 and self.down_price >= (target_price - epsilon) and self.down_size > 0:
             opportunities.append({
                 "side": "DOWN",
                 "outcome": self.outcomes[self.down_idx],
