@@ -48,7 +48,7 @@ MONITORED_ASSETS = ["bitcoin", "ethereum", "solana", "xrp"]
 
 # Time-based target price tiers (seconds_threshold, target_price)
 PRICE_TIERS = [
-    (60, 0.96),   # < 60s (1min): $0.96
+    (90, 0.96),   # < 60s (1min): $0.96
 ]
 
 
@@ -480,14 +480,24 @@ class SniperMonitor:
         up_asks = up_book.get("asks", [])
         down_asks = down_book.get("asks", [])
 
-        if not up_asks or not down_asks:
-            return
+        # Update current prices from WebSocket (0 if no liquidity)
+        if up_asks:
+            self.up_price = float(up_asks[0]["price"])
+            self.up_size = float(up_asks[0]["size"])
+        else:
+            self.up_price = 0.0
+            self.up_size = 0.0
 
-        # Update current prices from WebSocket
-        self.up_price = float(up_asks[0]["price"])
-        self.up_size = float(up_asks[0]["size"])
-        self.down_price = float(down_asks[0]["price"])
-        self.down_size = float(down_asks[0]["size"])
+        if down_asks:
+            self.down_price = float(down_asks[0]["price"])
+            self.down_size = float(down_asks[0]["size"])
+        else:
+            self.down_price = 0.0
+            self.down_size = 0.0
+
+        # Need at least one side to have data
+        if not up_asks and not down_asks:
+            return
         
         # Build countdown MM:SS from slug's interval end (matches Polymarket server time)
         total_secs = max(0, self.interval_end_unix - int(time.time()))
@@ -540,7 +550,7 @@ class SniperMonitor:
             if not self.warmed_up:
                 status += "⏳ Warming up"
             elif not in_trading_window:
-                status += "⏳ Waiting (<60s)"
+                status += "⏳ Waiting ..."
             elif not prices_valid:
                 if self.up_price == 0 or self.down_price == 0:
                     status += "⚠️ Invalid ($0 price)"
