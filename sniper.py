@@ -52,12 +52,12 @@ PRICE_TIERS = [
 ]
 
 
-def get_target_price(seconds_remaining: int) -> float:
-    """Get target price based on time remaining until resolution."""
+def get_target_price(seconds_remaining: int) -> float | None:
+    """Get target price based on time remaining until resolution. Returns None if not in trading window."""
     for threshold, price in PRICE_TIERS:
         if seconds_remaining < threshold:
             return price
-    return 0.98  # Fallback (not actively trading)
+    return None  # Not in active trading window
 
 # Trading Configuration
 EXECUTE_TRADES = True  # Set to True to enable actual trading
@@ -199,7 +199,7 @@ def _refresh_status():
             pass  # Ignore display errors
 
 
-def update_dashboard_asset(label: str, timer: str, target: float,
+def update_dashboard_asset(label: str, timer: str, target: float | None,
                            up_price: float, up_size: float,
                            down_price: float, down_size: float,
                            status: str = ""):
@@ -207,7 +207,7 @@ def update_dashboard_asset(label: str, timer: str, target: float,
     with _dashboard_lock:
         _dashboard_data["assets"][label] = {
             "timer": timer,
-            "target": target,
+            "target": target if target else 0.0,
             "up_price": up_price,
             "up_size": int(up_size),
             "down_price": down_price,
@@ -494,16 +494,18 @@ class SniperMonitor:
         mins = total_secs // 60
         secs = total_secs % 60
 
-        # Get dynamic target price based on time remaining
+        # Get dynamic target price based on time remaining (None = not in trading window)
         target = get_target_price(total_secs)
+        in_trading_window = target is not None
 
         # Build status line (pad tag to align columns)
         tag = f"[{self.asset_label}]" if self.asset_label else ""
         tag = tag.ljust(10)
+        target_display = f"${target:.2f}" if target else "---"
         status = (
             f"{tag} "
             f"⏱️ {mins:02d}:{secs:02d} | "
-            f"🎯 ${target:.2f} | "
+            f"🎯 {target_display} | "
             f"UP: ${self.up_price:.2f} | "
             f"DOWN: ${self.down_price:.2f} | "
         )
@@ -525,7 +527,7 @@ class SniperMonitor:
         # Update dashboard data
         timer_str = f"{mins:02d}:{secs:02d}"
         in_cooldown = self.last_snipe_attempt > 0 and (time.time() - self.last_snipe_attempt) < self.snipe_cooldown
-        dash_status = "sniped" if self.snipe_executed else ("cooldown" if in_cooldown else ("warming" if not self.warmed_up else ("stale" if not prices_valid else "monitoring")))
+        dash_status = "sniped" if self.snipe_executed else ("cooldown" if in_cooldown else ("warming" if not self.warmed_up else ("waiting" if not in_trading_window else ("stale" if not prices_valid else "monitoring"))))
         update_dashboard_asset(
             self.asset_label, timer_str, target,
             self.up_price, self.up_size,
@@ -537,6 +539,8 @@ class SniperMonitor:
         if not self.snipe_executed:
             if not self.warmed_up:
                 status += "⏳ Warming up"
+            elif not in_trading_window:
+                status += "⏳ Waiting (<60s)"
             elif not prices_valid:
                 if self.up_price == 0 or self.down_price == 0:
                     status += "⚠️ Invalid ($0 price)"
