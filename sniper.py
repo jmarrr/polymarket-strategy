@@ -911,7 +911,7 @@ def monitor_all_assets():
     print(f"🎯 MULTI-ASSET 15M RESOLUTION SNIPER (WebSocket)")
     print(f"{'='*70}")
     print(f"   Assets: {', '.join(a.upper() for a in MONITORED_ASSETS)}")
-    print(f"   Target prices: ${PRICE_TIERS[-1][1]:.2f} (>60s) → ${PRICE_TIERS[1][1]:.2f} (30-60s) → ${PRICE_TIERS[0][1]:.2f} (<30s)")
+    print(f"   Target: ${PRICE_TIERS[0][1]:.2f} (when <={PRICE_TIERS[0][0]}s remaining)")
     print(f"\n   💰 Trading: {'ENABLED' if EXECUTE_TRADES else 'DISABLED'}")
     if EXECUTE_TRADES:
         print(f"   📊 Max position: ${MAX_POSITION_SIZE} per trade")
