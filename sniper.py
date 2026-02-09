@@ -380,6 +380,29 @@ def parse_price_to_beat(question: str) -> float | None:
     return None
 
 
+def fetch_interval_open_price(asset: str, interval_start_unix: int) -> float | None:
+    """Fetch the opening price of a 15-minute interval from Binance klines.
+    For 'up/down' markets, the threshold is the price at interval start.
+    Returns None on failure (fail-open).
+    """
+    symbol = CRYPTO_SYMBOLS.get(asset)
+    if not symbol:
+        return None
+    try:
+        start_ms = interval_start_unix * 1000
+        resp = requests.get(BINANCE_KLINE_URL, params={
+            "symbol": symbol, "interval": "15m",
+            "startTime": start_ms, "limit": 1,
+        }, timeout=5)
+        if resp.status_code == 200:
+            klines = resp.json()
+            if klines:
+                return float(klines[0][1])  # index 1 = open price
+        return None
+    except Exception:
+        return None
+
+
 def fetch_crypto_price(asset: str) -> float | None:
     """Fetch current price for a crypto asset from Binance public API.
     Returns None on any failure (fail-open).
@@ -396,14 +419,15 @@ def fetch_crypto_price(asset: str) -> float | None:
         return None
 
 
-def check_price_buffer(asset: str, question: str, bet_side: str) -> tuple[bool, str]:
+def check_price_buffer(asset: str, question: str, bet_side: str, price_to_beat: float = None) -> tuple[bool, str]:
     """Check if current crypto price has sufficient buffer from the 'price to beat'.
 
     Returns (is_safe, reason). Fail-open: returns (True, ...) if data unavailable.
     """
-    price_to_beat = parse_price_to_beat(question)
     if price_to_beat is None:
-        return (True, "Could not parse price-to-beat (fail-open)")
+        price_to_beat = parse_price_to_beat(question)
+    if price_to_beat is None:
+        return (True, "Could not determine price-to-beat (fail-open)")
 
     current_price = fetch_crypto_price(asset)
     if current_price is None:
@@ -514,6 +538,13 @@ class SniperMonitor:
         self.market_info = market_info
         self.interval_end_unix = interval_end_unix
         self.question = market_info.get('question', '') or market_info.get('title', '') or market_info.get('description', '')
+        # Determine the price threshold for buffer/momentum checks
+        # Try parsing from question text first (for "above $X" markets), then fall back
+        # to fetching the interval opening price from Binance (for "up/down" markets)
+        self.price_to_beat = parse_price_to_beat(self.question)
+        if self.price_to_beat is None:
+            interval_start = interval_end_unix - 900
+            self.price_to_beat = fetch_interval_open_price(self.asset_name, interval_start)
         self.outcomes = json.loads(market_info.get("outcomes", "[]"))
         self.token_ids = json.loads(market_info.get("clobTokenIds", "[]"))
         
@@ -731,7 +762,8 @@ class SniperMonitor:
                 if opportunity:
                     # Price buffer safety check - verify crypto price isn't too close to threshold
                     is_safe, buffer_reason = check_price_buffer(
-                        self.asset_name, self.question, opportunity["side"]
+                        self.asset_name, self.question, opportunity["side"],
+                        price_to_beat=self.price_to_beat,
                     )
                     if not is_safe:
                         status += f"🛡️ {buffer_reason[:60]}"
@@ -747,10 +779,9 @@ class SniperMonitor:
                         return
 
                     # Momentum safety check - block if price trending toward threshold
-                    price_to_beat = parse_price_to_beat(self.question)
-                    if price_to_beat is not None:
+                    if self.price_to_beat is not None:
                         momentum_safe, momentum_reason = check_momentum(
-                            self.asset_name, price_to_beat, opportunity["side"]
+                            self.asset_name, self.price_to_beat, opportunity["side"]
                         )
                         if not momentum_safe:
                             status += f"📉 {momentum_reason[:60]}"
@@ -786,7 +817,7 @@ class SniperMonitor:
 
                         try:
                             # Gather context for enriched trade logging
-                            ptb = parse_price_to_beat(self.question)
+                            ptb = self.price_to_beat
                             cp = fetch_crypto_price(self.asset_name)
                             bp = ((cp - ptb) / ptb) * 100 if cp and ptb else None
                             trade_context = {
