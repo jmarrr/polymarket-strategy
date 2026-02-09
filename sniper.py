@@ -531,6 +531,7 @@ class SniperMonitor:
         self._attempting_snipe = False  # Flag to prevent concurrent snipe attempts
         self._bad_price_count = 0  # Counter for unrealistic price sums
         self._last_resync = 0  # Timestamp of last resync attempt
+        self._discord_notified = False  # Only send one Discord alert per slug
 
         # Current prices (updated in real-time)
         self.up_price = 0.0
@@ -729,11 +730,13 @@ class SniperMonitor:
                     if not is_safe:
                         status += f"🛡️ {buffer_reason[:60]}"
                         add_dashboard_error(self.asset_label, f"Buffer block: {buffer_reason}")
-                        send_discord_notification(
-                            f"🛡️ Buffer Block - {self.asset_label}",
-                            f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Reason:** {buffer_reason}",
-                            color=0xfbbf24,
-                        )
+                        if not self._discord_notified:
+                            self._discord_notified = True
+                            send_discord_notification(
+                                f"🛡️ Buffer Block - {self.asset_label}",
+                                f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Reason:** {buffer_reason}",
+                                color=0xfbbf24,
+                            )
                         _update_asset_status(self.asset_label, status)
                         return
 
@@ -746,11 +749,13 @@ class SniperMonitor:
                         if not momentum_safe:
                             status += f"📉 {momentum_reason[:60]}"
                             add_dashboard_error(self.asset_label, f"Momentum block: {momentum_reason}")
-                            send_discord_notification(
-                                f"📉 Momentum Block - {self.asset_label}",
-                                f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Reason:** {momentum_reason}",
-                                color=0xfbbf24,
-                            )
+                            if not self._discord_notified:
+                                self._discord_notified = True
+                                send_discord_notification(
+                                    f"📉 Momentum Block - {self.asset_label}",
+                                    f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Reason:** {momentum_reason}",
+                                    color=0xfbbf24,
+                                )
                             _update_asset_status(self.asset_label, status)
                             return
 
@@ -789,11 +794,13 @@ class SniperMonitor:
                                 # Failed - set cooldown
                                 self.last_snipe_attempt = time.time()
                                 status += f"❌ Failed (cooldown {self.snipe_cooldown}s)"
-                                send_discord_notification(
-                                    f"❌ Trade Failed - {self.asset_label}",
-                                    f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Cooldown:** {self.snipe_cooldown}s",
-                                    color=0xef4444,
-                                )
+                                if not self._discord_notified:
+                                    self._discord_notified = True
+                                    send_discord_notification(
+                                        f"❌ Trade Failed - {self.asset_label}",
+                                        f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Cooldown:** {self.snipe_cooldown}s",
+                                        color=0xef4444,
+                                    )
                         finally:
                             self._attempting_snipe = False
                         _update_asset_status(self.asset_label, status)
@@ -820,9 +827,10 @@ class SniperMonitor:
         opportunities = []
 
         # Use small epsilon to match display rounding (0.9795 displays as $0.98)
-        # Skip if price is 0 (no liquidity on that side)
+        # Skip if price is 0 (no liquidity) or >= $0.995 (no profit at $1.00)
         epsilon = 0.005
-        if self.up_price > 0 and self.up_price >= (target_price - epsilon) and self.up_size > 0:
+        max_price = 0.995
+        if self.up_price > 0 and self.up_price < max_price and self.up_price >= (target_price - epsilon) and self.up_size > 0:
             opportunities.append({
                 "side": "UP",
                 "outcome": self.outcomes[self.up_idx],
@@ -831,7 +839,7 @@ class SniperMonitor:
                 "size": self.up_size,
             })
 
-        if self.down_price > 0 and self.down_price >= (target_price - epsilon) and self.down_size > 0:
+        if self.down_price > 0 and self.down_price < max_price and self.down_price >= (target_price - epsilon) and self.down_size > 0:
             opportunities.append({
                 "side": "DOWN",
                 "outcome": self.outcomes[self.down_idx],
