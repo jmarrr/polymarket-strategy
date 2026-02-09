@@ -46,10 +46,10 @@ DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "5000"))
 
 # Price buffer safety check - block trades when crypto price is too close to threshold
 MIN_PRICE_BUFFER_PCT = {
-    "bitcoin": 0.5,
-    "ethereum": 0.5,
-    "solana": 0.8,
-    "xrp": 1.5,
+    "bitcoin": 0.15,
+    "ethereum": 0.15,
+    "solana": 0.2,
+    "xrp": 0.3,
 }
 CRYPTO_SYMBOLS = {"bitcoin": "BTCUSDT", "ethereum": "ETHUSDT", "solana": "SOLUSDT", "xrp": "XRPUSDT"}
 BINANCE_PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
