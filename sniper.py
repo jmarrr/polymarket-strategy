@@ -53,6 +53,14 @@ MIN_PRICE_BUFFER_PCT = {
 }
 CRYPTO_SYMBOLS = {"bitcoin": "BTCUSDT", "ethereum": "ETHUSDT", "solana": "SOLUSDT", "xrp": "XRPUSDT"}
 BINANCE_PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
+BINANCE_KLINE_URL = "https://api.binance.com/api/v3/klines"
+
+# Momentum check - block if price is moving toward threshold
+MOMENTUM_ENABLED = True
+MOMENTUM_LOOKBACK_MINUTES = 3  # Compare current price to N minutes ago
+
+# Discord notifications
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")  # Set in .env to enable
 
 # Strategy Configuration
 MONITORED_ASSETS = ["bitcoin", "ethereum", "solana", "xrp"]
@@ -416,6 +424,80 @@ def check_price_buffer(asset: str, question: str, bet_side: str) -> tuple[bool, 
     return (True, f"Unknown side '{bet_side}' (fail-open)")
 
 
+def fetch_price_history(asset: str, minutes: int = 3) -> list[float] | None:
+    """Fetch recent close prices from Binance kline API.
+
+    Returns list of close prices (oldest to newest), or None on failure (fail-open).
+    """
+    symbol = CRYPTO_SYMBOLS.get(asset)
+    if not symbol:
+        return None
+    try:
+        resp = requests.get(BINANCE_KLINE_URL, params={
+            "symbol": symbol,
+            "interval": "1m",
+            "limit": minutes,
+        }, timeout=3)
+        if resp.status_code == 200:
+            klines = resp.json()
+            return [float(k[4]) for k in klines]  # k[4] = close price
+        return None
+    except Exception:
+        return None
+
+
+def check_momentum(asset: str, price_to_beat: float, bet_side: str) -> tuple[bool, str]:
+    """Check if the crypto price is trending TOWARD the threshold (risky).
+
+    Returns (is_safe, reason). Fail-open: returns (True, ...) if data unavailable.
+    """
+    if not MOMENTUM_ENABLED:
+        return (True, "Momentum check disabled")
+
+    closes = fetch_price_history(asset, MOMENTUM_LOOKBACK_MINUTES)
+    if closes is None or len(closes) < 2:
+        return (True, "Could not fetch price history (fail-open)")
+
+    oldest = closes[0]
+    newest = closes[-1]
+    move_pct = ((newest - oldest) / oldest) * 100
+
+    if bet_side == "UP":
+        # Betting UP: dangerous if price is dropping toward threshold
+        if newest > price_to_beat and move_pct < -0.3:
+            return (False, f"MOMENTUM: price dropping {move_pct:+.2f}% toward threshold (${newest:,.2f} -> ${price_to_beat:,.2f})")
+    elif bet_side == "DOWN":
+        # Betting DOWN: dangerous if price is rising toward threshold
+        if newest < price_to_beat and move_pct > 0.3:
+            return (False, f"MOMENTUM: price rising {move_pct:+.2f}% toward threshold (${newest:,.2f} -> ${price_to_beat:,.2f})")
+
+    return (True, f"Momentum OK: {move_pct:+.2f}% over {MOMENTUM_LOOKBACK_MINUTES}min")
+
+
+def send_discord_notification(title: str, message: str, color: int = 0x667eea, ping_everyone: bool = False):
+    """Send a notification to Discord via webhook. Non-blocking (fire-and-forget)."""
+    if not DISCORD_WEBHOOK_URL:
+        return
+
+    def _send():
+        try:
+            payload = {
+                "embeds": [{
+                    "title": title,
+                    "description": message,
+                    "color": color,
+                    "timestamp": datetime.utcnow().isoformat(),
+                }]
+            }
+            if ping_everyone:
+                payload["content"] = "@everyone"
+            requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=5)
+        except Exception:
+            pass
+
+    threading.Thread(target=_send, daemon=True).start()
+
+
 class SniperMonitor:
     """WebSocket-based order book monitor for sniping near resolution."""
     
@@ -646,8 +728,30 @@ class SniperMonitor:
                     if not is_safe:
                         status += f"🛡️ {buffer_reason[:60]}"
                         add_dashboard_error(self.asset_label, f"Buffer block: {buffer_reason}")
+                        send_discord_notification(
+                            f"🛡️ Buffer Block - {self.asset_label}",
+                            f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Reason:** {buffer_reason}",
+                            color=0xfbbf24,
+                        )
                         _update_asset_status(self.asset_label, status)
                         return
+
+                    # Momentum safety check - block if price trending toward threshold
+                    price_to_beat = parse_price_to_beat(self.question)
+                    if price_to_beat is not None:
+                        momentum_safe, momentum_reason = check_momentum(
+                            self.asset_name, price_to_beat, opportunity["side"]
+                        )
+                        if not momentum_safe:
+                            status += f"📉 {momentum_reason[:60]}"
+                            add_dashboard_error(self.asset_label, f"Momentum block: {momentum_reason}")
+                            send_discord_notification(
+                                f"📉 Momentum Block - {self.asset_label}",
+                                f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Reason:** {momentum_reason}",
+                                color=0xfbbf24,
+                            )
+                            _update_asset_status(self.asset_label, status)
+                            return
 
                     if EXECUTE_TRADES and AUTO_SNIPE:
                         # Check if already sniped, currently attempting, or in cooldown
@@ -674,10 +778,21 @@ class SniperMonitor:
                                 with _trade_lock:
                                     self.snipe_executed = True
                                 status += "✅ SNIPED!"
+                                cost = int(MAX_POSITION_SIZE / opportunity["price"]) * opportunity["price"]
+                                send_discord_notification(
+                                    f"✅ Trade Executed - {self.asset_label}",
+                                    f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Cost:** ~${cost:.2f}",
+                                    color=0x4ade80,
+                                )
                             else:
                                 # Failed - set cooldown
                                 self.last_snipe_attempt = time.time()
                                 status += f"❌ Failed (cooldown {self.snipe_cooldown}s)"
+                                send_discord_notification(
+                                    f"❌ Trade Failed - {self.asset_label}",
+                                    f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Cooldown:** {self.snipe_cooldown}s",
+                                    color=0xef4444,
+                                )
                         finally:
                             self._attempting_snipe = False
                         _update_asset_status(self.asset_label, status)
@@ -917,6 +1032,15 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
             get_trading_client(force_refresh=True)
             return execute_snipe(opportunity, size, target_price, monitor_label, _retry=True)
         add_dashboard_error(label, f"Exception: {error_str}")
+        # Ping @everyone for insufficient funds or balance errors
+        error_lower = error_str.lower()
+        if any(kw in error_lower for kw in ["insufficient", "balance", "fund", "allowance"]):
+            send_discord_notification(
+                f"🚨 INSUFFICIENT FUNDS - {label}",
+                f"**Error:** {error_str[:200]}\n**Side:** {opportunity.get('side', '?')}\n**Price:** ${opportunity.get('price', 0):.2f}",
+                color=0xff0000,
+                ping_everyone=True,
+            )
         return False
 
 
@@ -1009,6 +1133,8 @@ def monitor_all_assets():
     if EXECUTE_TRADES:
         print(f"   📊 Max position: ${MAX_POSITION_SIZE} per trade")
         print(f"   🤖 Auto-snipe: {AUTO_SNIPE}")
+    print(f"   📉 Momentum check: {'ON' if MOMENTUM_ENABLED else 'OFF'} ({MOMENTUM_LOOKBACK_MINUTES}min lookback)")
+    print(f"   🔔 Discord: {'ON' if DISCORD_WEBHOOK_URL else 'OFF'}")
     print(f"\n   🛑 Press Ctrl+C to stop")
     print(f"{'='*70}\n")
     sys.stdout.flush()

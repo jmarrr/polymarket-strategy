@@ -12,11 +12,14 @@ Collection of trading bots and tools for Polymarket prediction markets, primaril
 ## Environment Variables
 - `PRIVATE_KEY` — Polygon wallet private key for signing transactions
 - `FUNDER_ADDRESS` — Funder wallet address (Safe/proxy wallet)
+- `DISCORD_WEBHOOK_URL` — Discord webhook URL for trade notifications (optional)
+- `DASHBOARD_PORT` — Web dashboard port (default: 5000)
 
 ## APIs Used
 - **CLOB API** (`clob.polymarket.com`) — Order placement and order book queries via `py_clob_client`
 - **Gamma API** (`gamma-api.polymarket.com`) — Market/event discovery by slug
 - **WebSocket** (`ws-subscriptions-clob.polymarket.com`) — Real-time order book updates
+- **Binance API** (`api.binance.com`) — Real-time crypto prices (`/api/v3/ticker/price`) and kline history (`/api/v3/klines`) for safety checks
 
 ## Dependencies
 - `py_clob_client` — Polymarket CLOB client (provides `ClobClient`, `OrderArgs`, `OrderType`)
@@ -41,17 +44,28 @@ Collection of trading bots and tools for Polymarket prediction markets, primaril
 More aggressive targets as time runs out:
 ```python
 PRICE_TIERS = [
-    (30, 0.85),   # <= 30s remaining: $0.85
-    (60, 0.92),   # <= 60s remaining: $0.92
-    (float('inf'), 0.96),  # > 60s: $0.96 (conservative)
+    (60, 0.96),    # < 60s (1min): $0.96
+    (120, 0.97),   # < 120s (2min): $0.97
+    (300, 0.98),   # < 300s (5min): $0.98
 ]
 ```
 
+## Safety Checks (before every trade)
+1. **Price buffer** — Fetches real crypto price from Binance, blocks trade if too close to threshold. Per-asset buffers: BTC 0.5%, ETH 0.5%, SOL 0.8%, XRP 1.5%.
+2. **Momentum check** — Fetches last 3 minutes of klines from Binance. Blocks if price is moving >0.3% toward the threshold (risk of flipping).
+3. Both checks are **fail-open**: if Binance is down or data unavailable, trade proceeds normally.
+
+## Discord Notifications
+Set `DISCORD_WEBHOOK_URL` in `.env` to receive notifications for:
+- Successful trades, failed trades, buffer blocks, momentum blocks
+
 ## Trading Configuration
 - `EXECUTE_TRADES` — Enable/disable actual trading
-- `MAX_POSITION_SIZE` — Maximum USDC per trade ($50 default)
-- `MAX_TOTAL_EXPOSURE` — Maximum total USDC across all positions ($200 default)
+- `MAX_POSITION_SIZE` — Maximum USDC per trade ($100 default)
+- `MAX_TOTAL_EXPOSURE` — Maximum total USDC across all positions ($500 default)
 - `AUTO_SNIPE` — Automatically execute when opportunity found
+- `MOMENTUM_ENABLED` — Enable/disable momentum check (default: True)
+- `MOMENTUM_LOOKBACK_MINUTES` — Minutes of price history to check (default: 3)
 
 ## Running
 
