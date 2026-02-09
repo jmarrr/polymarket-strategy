@@ -513,7 +513,7 @@ class SniperMonitor:
         self.asset_name = asset_name or asset_label.lower()
         self.market_info = market_info
         self.interval_end_unix = interval_end_unix
-        self.question = market_info.get('question', '')
+        self.question = market_info.get('question', '') or market_info.get('title', '') or market_info.get('description', '')
         self.outcomes = json.loads(market_info.get("outcomes", "[]"))
         self.token_ids = json.loads(market_info.get("clobTokenIds", "[]"))
         
@@ -1144,6 +1144,10 @@ def monitor_asset(asset: str):
                     continue
 
                 market = open_markets[0]
+                # Carry event-level title/question into the market dict for price parsing
+                event_question = event_data.get("title", "") or event_data.get("question", "")
+                if event_question and not market.get("question"):
+                    market["question"] = event_question
                 _update_asset_status(label, f"[{label}]".ljust(12) + f"| ✅ Found market, connecting...")
 
                 # Start WebSocket monitor (interval_end_unix already calculated above)
