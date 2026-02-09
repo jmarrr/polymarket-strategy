@@ -51,7 +51,7 @@ PRICE_TIERS = [
 ```
 
 ## Safety Checks (before every trade)
-1. **Price buffer** — Fetches real crypto price from Binance, blocks trade if too close to threshold. Per-asset buffers: BTC 0.5%, ETH 0.5%, SOL 0.8%, XRP 1.5%.
+1. **Price buffer** — Fetches real crypto price from Binance, blocks trade if too close to threshold. Uniform 0.1% buffer for all assets.
 2. **Momentum check** — Fetches last 3 minutes of klines from Binance. Blocks if price is moving >0.3% toward the threshold (risk of flipping).
 3. Both checks are **fail-open**: if Binance is down or data unavailable, trade proceeds normally.
 
