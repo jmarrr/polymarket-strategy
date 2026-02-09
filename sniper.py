@@ -53,9 +53,11 @@ BINANCE_PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
 MONITORED_ASSETS = ["bitcoin", "ethereum", "solana"]
 
 # Time-based target price tiers (seconds_threshold, target_price)
+# More aggressive closer to resolution, conservative early
 PRICE_TIERS = [
-    (120, 0.96),   # < 60s (2min): $0.96
-    (300, 0.96),   # < 300s (5min): $0.98
+    (60, 0.96),    # < 60s (1min): $0.96 - market very settled
+    (120, 0.97),   # < 120s (2min): $0.97
+    (300, 0.98),   # < 300s (5min): $0.98 - need high certainty
 ]
 
 
@@ -996,7 +998,7 @@ def monitor_all_assets():
     print(f"🎯 MULTI-ASSET 15M RESOLUTION SNIPER (WebSocket)")
     print(f"{'='*70}")
     print(f"   Assets: {', '.join(a.upper() for a in MONITORED_ASSETS)}")
-    print(f"   Target: ${PRICE_TIERS[0][1]:.2f} (when <{PRICE_TIERS[0][0]}s remaining)")
+    print(f"   Targets: {', '.join(f'${p:.2f} (<{t}s)' for t, p in PRICE_TIERS)}")
     print(f"\n   💰 Trading: {'ENABLED' if EXECUTE_TRADES else 'DISABLED'}")
     if EXECUTE_TRADES:
         print(f"   📊 Max position: ${MAX_POSITION_SIZE} per trade")
