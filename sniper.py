@@ -149,15 +149,21 @@ def _setup_trade_logger():
     return logger
 
 
-def log_trade(asset: str, side: str, price: float, size: int, success: bool, order_id: str = ""):
-    """Log a trade to file."""
+def log_trade(asset: str, side: str, price: float, size: int, success: bool, order_id: str = "",
+              time_remaining=None, target_price=None, crypto_price=None, price_to_beat=None, buffer_pct=None):
+    """Log a trade to file with context data for strategy validation."""
     global _trade_logger
     if _trade_logger is None:
         _trade_logger = _setup_trade_logger()
 
     status = "SUCCESS" if success else "FAILED"
     cost = size * price
-    _trade_logger.info(f"{status} | {asset} | {side} | ${price:.4f} | {size} shares | ${cost:.2f} | {order_id}")
+    timer_str = f"timer={time_remaining}s" if time_remaining is not None else "timer=N/A"
+    target_str = f"target=${target_price:.2f}" if target_price else "target=N/A"
+    crypto_str = f"crypto=${crypto_price:,.2f}" if crypto_price else "crypto=N/A"
+    threshold_str = f"threshold=${price_to_beat:,.2f}" if price_to_beat else "threshold=N/A"
+    buffer_str = f"buffer={buffer_pct:+.2f}%" if buffer_pct is not None else "buffer=N/A"
+    _trade_logger.info(f"{status} | {asset} | {side} | ${price:.4f} | {size} shares | ${cost:.2f} | {timer_str} | {target_str} | {crypto_str} | {threshold_str} | {buffer_str} | {order_id}")
 
 
 def can_open_position(cost: float) -> bool:
@@ -779,7 +785,18 @@ class SniperMonitor:
                             self._attempting_snipe = True
 
                         try:
-                            success = execute_snipe(opportunity, target_price=target, monitor_label=self.asset_label)
+                            # Gather context for enriched trade logging
+                            ptb = parse_price_to_beat(self.question)
+                            cp = fetch_crypto_price(self.asset_name)
+                            bp = ((cp - ptb) / ptb) * 100 if cp and ptb else None
+                            trade_context = {
+                                "time_remaining": total_secs,
+                                "target_price": target,
+                                "crypto_price": cp,
+                                "price_to_beat": ptb,
+                                "buffer_pct": bp,
+                            }
+                            success = execute_snipe(opportunity, target_price=target, monitor_label=self.asset_label, trade_context=trade_context)
                             if success:
                                 with _trade_lock:
                                     self.snipe_executed = True
@@ -966,7 +983,7 @@ class SniperMonitor:
             self.ws.close()
 
 
-def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.98, monitor_label: str = None, _retry: bool = False) -> bool:
+def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.98, monitor_label: str = None, _retry: bool = False, trade_context: dict = None) -> bool:
     """Execute snipe trade using WebSocket prices. FOK order ensures full fill or cancel."""
     global _balance_exhausted
     label = monitor_label or "UNKNOWN"
@@ -1026,8 +1043,14 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         success = result.get("success", False)
         order_id = result.get("orderID", "")
 
-        # Log the trade
-        log_trade(monitor_label or "UNKNOWN", opportunity["side"], price, size, success, order_id)
+        # Log the trade with context
+        ctx = trade_context or {}
+        log_trade(monitor_label or "UNKNOWN", opportunity["side"], price, size, success, order_id,
+                  time_remaining=ctx.get("time_remaining"),
+                  target_price=ctx.get("target_price"),
+                  crypto_price=ctx.get("crypto_price"),
+                  price_to_beat=ctx.get("price_to_beat"),
+                  buffer_pct=ctx.get("buffer_pct"))
 
         # Add to dashboard
         add_dashboard_trade(label, opportunity["side"], price, size, success)
@@ -1044,7 +1067,7 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         if "403" in error_str and not _retry:
             add_dashboard_error(label, "403 error - refreshing credentials...")
             get_trading_client(force_refresh=True)
-            return execute_snipe(opportunity, size, target_price, monitor_label, _retry=True)
+            return execute_snipe(opportunity, size, target_price, monitor_label, _retry=True, trade_context=trade_context)
         add_dashboard_error(label, f"Exception: {error_str}")
         # Ping @everyone for insufficient funds or balance errors
         error_lower = error_str.lower()
