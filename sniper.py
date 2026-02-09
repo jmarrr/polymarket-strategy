@@ -10,7 +10,6 @@ Uses WebSocket for real-time order book updates.
 """
 
 import os
-import re
 import sys
 import json
 import time
@@ -44,21 +43,6 @@ PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 FUNDER = os.getenv("FUNDER_ADDRESS")
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "5000"))
 
-# Price buffer safety check - block trades when crypto price is too close to threshold
-MIN_PRICE_BUFFER_PCT = {
-    "bitcoin": 0.1,
-    "ethereum": 0.1,
-    "solana": 0.1,
-    "xrp": 0.1,
-}
-CRYPTO_SYMBOLS = {"bitcoin": "BTCUSDT", "ethereum": "ETHUSDT", "solana": "SOLUSDT", "xrp": "XRPUSDT"}
-BINANCE_PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
-BINANCE_KLINE_URL = "https://api.binance.com/api/v3/klines"
-
-# Momentum check - block if price is moving toward threshold
-MOMENTUM_ENABLED = True
-MOMENTUM_LOOKBACK_MINUTES = 3  # Compare current price to N minutes ago
-
 # Discord notifications
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")  # Set in .env to enable
 
@@ -68,9 +52,7 @@ MONITORED_ASSETS = ["bitcoin", "ethereum", "solana", "xrp"]
 # Time-based target price tiers (seconds_threshold, target_price)
 # More aggressive closer to resolution, conservative early
 PRICE_TIERS = [
-    (60, 0.96),    # < 60s (1min): $0.96 - market very settled
-    (120, 0.97),   # < 120s (2min): $0.97
-    (300, 0.98),   # < 300s (5min): $0.98 - need high certainty
+    (120, 0.98),
 ]
 
 
@@ -150,8 +132,8 @@ def _setup_trade_logger():
 
 
 def log_trade(asset: str, side: str, price: float, size: int, success: bool, order_id: str = "",
-              time_remaining=None, target_price=None, crypto_price=None, price_to_beat=None, buffer_pct=None):
-    """Log a trade to file with context data for strategy validation."""
+              time_remaining=None, target_price=None):
+    """Log a trade to file."""
     global _trade_logger
     if _trade_logger is None:
         _trade_logger = _setup_trade_logger()
@@ -160,10 +142,7 @@ def log_trade(asset: str, side: str, price: float, size: int, success: bool, ord
     cost = size * price
     timer_str = f"timer={time_remaining}s" if time_remaining is not None else "timer=N/A"
     target_str = f"target=${target_price:.2f}" if target_price else "target=N/A"
-    crypto_str = f"crypto=${crypto_price:,.2f}" if crypto_price else "crypto=N/A"
-    threshold_str = f"threshold=${price_to_beat:,.2f}" if price_to_beat else "threshold=N/A"
-    buffer_str = f"buffer={buffer_pct:+.2f}%" if buffer_pct is not None else "buffer=N/A"
-    _trade_logger.info(f"{status} | {asset} | {side} | ${price:.4f} | {size} shares | ${cost:.2f} | {timer_str} | {target_str} | {crypto_str} | {threshold_str} | {buffer_str} | {order_id}")
+    _trade_logger.info(f"{status} | {asset} | {side} | ${price:.4f} | {size} shares | ${cost:.2f} | {timer_str} | {target_str} | {order_id}")
 
 
 def can_open_position(cost: float) -> bool:
@@ -365,145 +344,6 @@ def fetch_market_by_slug(slug: str) -> dict | None:
         return None
 
 
-def parse_price_to_beat(question: str) -> float | None:
-    """Extract the 'price to beat' dollar amount from a market question string.
-
-    E.g. "Will Bitcoin be above $70,703.29 at 12:30AM ET?" -> 70703.29
-    Returns None if no price found (fail-open: trade proceeds).
-    """
-    match = re.search(r'\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?)', question)
-    if match:
-        try:
-            return float(match.group(1).replace(',', ''))
-        except ValueError:
-            return None
-    return None
-
-
-def fetch_interval_open_price(asset: str, interval_start_unix: int) -> float | None:
-    """Fetch the opening price of a 15-minute interval from Binance klines.
-    For 'up/down' markets, the threshold is the price at interval start.
-    Returns None on failure (fail-open).
-    """
-    symbol = CRYPTO_SYMBOLS.get(asset)
-    if not symbol:
-        return None
-    try:
-        start_ms = interval_start_unix * 1000
-        resp = requests.get(BINANCE_KLINE_URL, params={
-            "symbol": symbol, "interval": "15m",
-            "startTime": start_ms, "limit": 1,
-        }, timeout=5)
-        if resp.status_code == 200:
-            klines = resp.json()
-            if klines:
-                return float(klines[0][1])  # index 1 = open price
-        return None
-    except Exception:
-        return None
-
-
-def fetch_crypto_price(asset: str) -> float | None:
-    """Fetch current price for a crypto asset from Binance public API.
-    Returns None on any failure (fail-open).
-    """
-    symbol = CRYPTO_SYMBOLS.get(asset)
-    if not symbol:
-        return None
-    try:
-        resp = requests.get(BINANCE_PRICE_URL, params={"symbol": symbol}, timeout=3)
-        if resp.status_code == 200:
-            return float(resp.json().get("price", 0))
-        return None
-    except Exception:
-        return None
-
-
-def check_price_buffer(asset: str, question: str, bet_side: str, price_to_beat: float = None) -> tuple[bool, str]:
-    """Check if current crypto price has sufficient buffer from the 'price to beat'.
-
-    Returns (is_safe, reason). Fail-open: returns (True, ...) if data unavailable.
-    """
-    if price_to_beat is None:
-        price_to_beat = parse_price_to_beat(question)
-    if price_to_beat is None:
-        return (True, "Could not determine price-to-beat (fail-open)")
-
-    current_price = fetch_crypto_price(asset)
-    if current_price is None:
-        return (True, "Could not fetch crypto price (fail-open)")
-
-    min_buffer = MIN_PRICE_BUFFER_PCT.get(asset, 1.0)
-    buffer_pct = ((current_price - price_to_beat) / price_to_beat) * 100
-    abs_buffer = abs(buffer_pct)
-
-    if bet_side == "UP":
-        if buffer_pct > 0 and abs_buffer >= min_buffer:
-            return (True, f"SAFE: ${current_price:,.2f} is {buffer_pct:+.2f}% above ${price_to_beat:,.2f}")
-        elif buffer_pct > 0:
-            return (False, f"TOO CLOSE: ${current_price:,.2f} only {buffer_pct:+.2f}% above ${price_to_beat:,.2f} (need {min_buffer}%)")
-        else:
-            return (False, f"WRONG DIR: ${current_price:,.2f} is {buffer_pct:+.2f}% below ${price_to_beat:,.2f}")
-    elif bet_side == "DOWN":
-        if buffer_pct < 0 and abs_buffer >= min_buffer:
-            return (True, f"SAFE: ${current_price:,.2f} is {abs_buffer:.2f}% below ${price_to_beat:,.2f}")
-        elif buffer_pct < 0:
-            return (False, f"TOO CLOSE: ${current_price:,.2f} only {abs_buffer:.2f}% below ${price_to_beat:,.2f} (need {min_buffer}%)")
-        else:
-            return (False, f"WRONG DIR: ${current_price:,.2f} is {buffer_pct:+.2f}% above ${price_to_beat:,.2f}")
-
-    return (True, f"Unknown side '{bet_side}' (fail-open)")
-
-
-def fetch_price_history(asset: str, minutes: int = 3) -> list[float] | None:
-    """Fetch recent close prices from Binance kline API.
-
-    Returns list of close prices (oldest to newest), or None on failure (fail-open).
-    """
-    symbol = CRYPTO_SYMBOLS.get(asset)
-    if not symbol:
-        return None
-    try:
-        resp = requests.get(BINANCE_KLINE_URL, params={
-            "symbol": symbol,
-            "interval": "1m",
-            "limit": minutes,
-        }, timeout=3)
-        if resp.status_code == 200:
-            klines = resp.json()
-            return [float(k[4]) for k in klines]  # k[4] = close price
-        return None
-    except Exception:
-        return None
-
-
-def check_momentum(asset: str, price_to_beat: float, bet_side: str) -> tuple[bool, str]:
-    """Check if the crypto price is trending TOWARD the threshold (risky).
-
-    Returns (is_safe, reason). Fail-open: returns (True, ...) if data unavailable.
-    """
-    if not MOMENTUM_ENABLED:
-        return (True, "Momentum check disabled")
-
-    closes = fetch_price_history(asset, MOMENTUM_LOOKBACK_MINUTES)
-    if closes is None or len(closes) < 2:
-        return (True, "Could not fetch price history (fail-open)")
-
-    oldest = closes[0]
-    newest = closes[-1]
-    move_pct = ((newest - oldest) / oldest) * 100
-
-    if bet_side == "UP":
-        # Betting UP: dangerous if price is dropping toward threshold
-        if newest > price_to_beat and move_pct < -0.3:
-            return (False, f"MOMENTUM: price dropping {move_pct:+.2f}% toward threshold (${newest:,.2f} -> ${price_to_beat:,.2f})")
-    elif bet_side == "DOWN":
-        # Betting DOWN: dangerous if price is rising toward threshold
-        if newest < price_to_beat and move_pct > 0.3:
-            return (False, f"MOMENTUM: price rising {move_pct:+.2f}% toward threshold (${newest:,.2f} -> ${price_to_beat:,.2f})")
-
-    return (True, f"Momentum OK: {move_pct:+.2f}% over {MOMENTUM_LOOKBACK_MINUTES}min")
-
 
 def send_discord_notification(title: str, message: str, color: int = 0x667eea, ping_everyone: bool = False):
     """Send a notification to Discord via webhook. Non-blocking (fire-and-forget)."""
@@ -538,13 +378,6 @@ class SniperMonitor:
         self.market_info = market_info
         self.interval_end_unix = interval_end_unix
         self.question = market_info.get('question', '') or market_info.get('title', '') or market_info.get('description', '')
-        # Determine the price threshold for buffer/momentum checks
-        # Try parsing from question text first (for "above $X" markets), then fall back
-        # to fetching the interval opening price from Binance (for "up/down" markets)
-        self.price_to_beat = parse_price_to_beat(self.question)
-        if self.price_to_beat is None:
-            interval_start = interval_end_unix - 900
-            self.price_to_beat = fetch_interval_open_price(self.asset_name, interval_start)
         self.outcomes = json.loads(market_info.get("outcomes", "[]"))
         self.token_ids = json.loads(market_info.get("clobTokenIds", "[]"))
         
@@ -760,42 +593,6 @@ class SniperMonitor:
                 opportunity = self.get_best_opportunity(target)
 
                 if opportunity:
-                    # Price buffer safety check - verify crypto price isn't too close to threshold
-                    is_safe, buffer_reason = check_price_buffer(
-                        self.asset_name, self.question, opportunity["side"],
-                        price_to_beat=self.price_to_beat,
-                    )
-                    if not is_safe:
-                        status += f"🛡️ {buffer_reason[:60]}"
-                        add_dashboard_error(self.asset_label, f"Buffer block: {buffer_reason}")
-                        if not self._discord_notified:
-                            self._discord_notified = True
-                            send_discord_notification(
-                                f"🛡️ Buffer Block - {self.asset_label}",
-                                f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Timer:** {total_secs}s\n**Target:** ${target:.2f}\n**Reason:** {buffer_reason}",
-                                color=0xfbbf24,
-                            )
-                        _update_asset_status(self.asset_label, status)
-                        return
-
-                    # Momentum safety check - block if price trending toward threshold
-                    if self.price_to_beat is not None:
-                        momentum_safe, momentum_reason = check_momentum(
-                            self.asset_name, self.price_to_beat, opportunity["side"]
-                        )
-                        if not momentum_safe:
-                            status += f"📉 {momentum_reason[:60]}"
-                            add_dashboard_error(self.asset_label, f"Momentum block: {momentum_reason}")
-                            if not self._discord_notified:
-                                self._discord_notified = True
-                                send_discord_notification(
-                                    f"📉 Momentum Block - {self.asset_label}",
-                                    f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Timer:** {total_secs}s\n**Target:** ${target:.2f}\n**Reason:** {momentum_reason}",
-                                    color=0xfbbf24,
-                                )
-                            _update_asset_status(self.asset_label, status)
-                            return
-
                     if EXECUTE_TRADES and AUTO_SNIPE:
                         # Check if already sniped, currently attempting, or in cooldown
                         with _trade_lock:
@@ -816,16 +613,9 @@ class SniperMonitor:
                             self._attempting_snipe = True
 
                         try:
-                            # Gather context for enriched trade logging
-                            ptb = self.price_to_beat
-                            cp = fetch_crypto_price(self.asset_name)
-                            bp = ((cp - ptb) / ptb) * 100 if cp and ptb else None
                             trade_context = {
                                 "time_remaining": total_secs,
                                 "target_price": target,
-                                "crypto_price": cp,
-                                "price_to_beat": ptb,
-                                "buffer_pct": bp,
                             }
                             success = execute_snipe(opportunity, target_price=target, monitor_label=self.asset_label, trade_context=trade_context)
                             if success:
@@ -833,12 +623,9 @@ class SniperMonitor:
                                     self.snipe_executed = True
                                 status += "✅ SNIPED!"
                                 cost = int(MAX_POSITION_SIZE / opportunity["price"]) * opportunity["price"]
-                                crypto_str = f"${cp:,.2f}" if cp else "N/A"
-                                threshold_str = f"${ptb:,.2f}" if ptb else "N/A"
-                                buffer_str = f"{bp:+.2f}%" if bp is not None else "N/A"
                                 send_discord_notification(
                                     f"✅ Trade Executed - {self.asset_label}",
-                                    f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Cost:** ~${cost:.2f}\n**Timer:** {total_secs}s\n**Target:** ${target:.2f}\n**Crypto:** {crypto_str}\n**Threshold:** {threshold_str}\n**Buffer:** {buffer_str}",
+                                    f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Cost:** ~${cost:.2f}\n**Timer:** {total_secs}s\n**Target:** ${target:.2f}",
                                     color=0x4ade80,
                                 )
                             else:
@@ -847,12 +634,9 @@ class SniperMonitor:
                                 status += f"❌ Failed (cooldown {self.snipe_cooldown}s)"
                                 if not self._discord_notified:
                                     self._discord_notified = True
-                                    crypto_str = f"${cp:,.2f}" if cp else "N/A"
-                                    threshold_str = f"${ptb:,.2f}" if ptb else "N/A"
-                                    buffer_str = f"{bp:+.2f}%" if bp is not None else "N/A"
                                     send_discord_notification(
                                         f"❌ Trade Failed - {self.asset_label}",
-                                        f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Timer:** {total_secs}s\n**Target:** ${target:.2f}\n**Crypto:** {crypto_str}\n**Threshold:** {threshold_str}\n**Buffer:** {buffer_str}\n**Cooldown:** {self.snipe_cooldown}s",
+                                        f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Timer:** {total_secs}s\n**Target:** ${target:.2f}\n**Cooldown:** {self.snipe_cooldown}s",
                                         color=0xef4444,
                                     )
                         finally:
@@ -1084,10 +868,7 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         ctx = trade_context or {}
         log_trade(monitor_label or "UNKNOWN", opportunity["side"], price, size, success, order_id,
                   time_remaining=ctx.get("time_remaining"),
-                  target_price=ctx.get("target_price"),
-                  crypto_price=ctx.get("crypto_price"),
-                  price_to_beat=ctx.get("price_to_beat"),
-                  buffer_pct=ctx.get("buffer_pct"))
+                  target_price=ctx.get("target_price"))
 
         # Add to dashboard
         add_dashboard_trade(label, opportunity["side"], price, size, success)
@@ -1216,7 +997,6 @@ def monitor_all_assets():
     if EXECUTE_TRADES:
         print(f"   📊 Max position: ${MAX_POSITION_SIZE} per trade")
         print(f"   🤖 Auto-snipe: {AUTO_SNIPE}")
-    print(f"   📉 Momentum check: {'ON' if MOMENTUM_ENABLED else 'OFF'} ({MOMENTUM_LOOKBACK_MINUTES}min lookback)")
     print(f"   🔔 Discord: {'ON' if DISCORD_WEBHOOK_URL else 'OFF'}")
     print(f"\n   🛑 Press Ctrl+C to stop")
     print(f"{'='*70}\n")

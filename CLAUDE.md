@@ -7,7 +7,7 @@ Collection of trading bots and tools for Polymarket prediction markets, primaril
 
 ## Key Files
 
-- `sniper.py` — Multi-asset 15m resolution sniper (BTC, ETH, SOL, XRP). WebSocket-based, monitors order books and buys when price hits target. Includes built-in web dashboard on port 5000.
+- `sniper.py` — BTC-only 15m resolution sniper. WebSocket-based, monitors order books and buys when price hits target. Includes built-in web dashboard on port 5000.
 
 ## Environment Variables
 - `PRIVATE_KEY` — Polygon wallet private key for signing transactions
@@ -19,7 +19,6 @@ Collection of trading bots and tools for Polymarket prediction markets, primaril
 - **CLOB API** (`clob.polymarket.com`) — Order placement and order book queries via `py_clob_client`
 - **Gamma API** (`gamma-api.polymarket.com`) — Market/event discovery by slug
 - **WebSocket** (`ws-subscriptions-clob.polymarket.com`) — Real-time order book updates
-- **Binance API** (`api.binance.com`) — Real-time crypto prices (`/api/v3/ticker/price`) and kline history (`/api/v3/klines`) for safety checks
 
 ## Dependencies
 - `py_clob_client` — Polymarket CLOB client (provides `ClobClient`, `OrderArgs`, `OrderType`)
@@ -50,22 +49,15 @@ PRICE_TIERS = [
 ]
 ```
 
-## Safety Checks (before every trade)
-1. **Price buffer** — Fetches real crypto price from Binance, blocks trade if too close to threshold. Uniform 0.1% buffer for all assets.
-2. **Momentum check** — Fetches last 3 minutes of klines from Binance. Blocks if price is moving >0.3% toward the threshold (risk of flipping).
-3. Both checks are **fail-open**: if Binance is down or data unavailable, trade proceeds normally.
-
 ## Discord Notifications
 Set `DISCORD_WEBHOOK_URL` in `.env` to receive notifications for:
-- Successful trades, failed trades, buffer blocks, momentum blocks
+- Successful trades, failed trades
 
 ## Trading Configuration
 - `EXECUTE_TRADES` — Enable/disable actual trading
 - `MAX_POSITION_SIZE` — Maximum USDC per trade ($100 default)
 - `MAX_TOTAL_EXPOSURE` — Maximum total USDC across all positions ($500 default)
 - `AUTO_SNIPE` — Automatically execute when opportunity found
-- `MOMENTUM_ENABLED` — Enable/disable momentum check (default: True)
-- `MOMENTUM_LOOKBACK_MINUTES` — Minutes of price history to check (default: 3)
 
 ## Running
 
