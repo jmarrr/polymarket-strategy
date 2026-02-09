@@ -109,6 +109,7 @@ _positions = {}  # {asset: {"side": str, "size": int, "price": float, "cost": fl
 _total_exposure = 0.0
 _position_lock = threading.Lock()
 MAX_TOTAL_EXPOSURE = 500  # Maximum total USDC across all positions
+_balance_exhausted = False  # Set True on insufficient funds — stops all trading
 
 # Trade logger
 _trade_logger = None
@@ -959,9 +960,14 @@ class SniperMonitor:
 
 def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.98, monitor_label: str = None, _retry: bool = False) -> bool:
     """Execute snipe trade using WebSocket prices. FOK order ensures full fill or cancel."""
+    global _balance_exhausted
     label = monitor_label or "UNKNOWN"
 
     if not EXECUTE_TRADES:
+        return False
+
+    if _balance_exhausted:
+        add_dashboard_error(label, "Trading halted - insufficient funds")
         return False
 
     # Check liquidity before doing anything
@@ -1035,9 +1041,10 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         # Ping @everyone for insufficient funds or balance errors
         error_lower = error_str.lower()
         if any(kw in error_lower for kw in ["insufficient", "balance", "fund", "allowance"]):
+            _balance_exhausted = True
             send_discord_notification(
                 f"🚨 INSUFFICIENT FUNDS - {label}",
-                f"**Error:** {error_str[:200]}\n**Side:** {opportunity.get('side', '?')}\n**Price:** ${opportunity.get('price', 0):.2f}",
+                f"**Error:** {error_str[:200]}\n**Side:** {opportunity.get('side', '?')}\n**Price:** ${opportunity.get('price', 0):.2f}\n\n**Trading halted** until next interval. Claim winnings to resume.",
                 color=0xff0000,
                 ping_everyone=True,
             )
@@ -1056,6 +1063,10 @@ def monitor_asset(asset: str):
 
             # Check if we moved to a new interval
             if slug != current_slug:
+                # New interval — reset balance halt (user may have claimed winnings)
+                global _balance_exhausted
+                _balance_exhausted = False
+
                 # Clear position from previous interval (it has resolved)
                 clear_position(label)
 
