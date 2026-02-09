@@ -45,12 +45,12 @@ FUNDER = os.getenv("FUNDER_ADDRESS")
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "5000"))
 
 # Price buffer safety check - block trades when crypto price is too close to threshold
-MIN_PRICE_BUFFER_PCT = float(os.getenv("MIN_PRICE_BUFFER_PCT", "0.5"))  # Minimum % distance from "price to beat"
-CRYPTO_SYMBOLS = {"bitcoin": "BTCUSDT", "ethereum": "ETHUSDT", "solana": "SOLUSDT"}
+MIN_PRICE_BUFFER_PCT = float(os.getenv("MIN_PRICE_BUFFER_PCT", "1.0"))  # Minimum % distance from "price to beat"
+CRYPTO_SYMBOLS = {"bitcoin": "BTCUSDT", "ethereum": "ETHUSDT", "solana": "SOLUSDT", "xrp": "XRPUSDT"}
 BINANCE_PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
 
 # Strategy Configuration
-MONITORED_ASSETS = ["bitcoin", "ethereum", "solana"]
+MONITORED_ASSETS = ["bitcoin", "ethereum", "solana", "xrp"]
 
 # Time-based target price tiers (seconds_threshold, target_price)
 # More aggressive closer to resolution, conservative early
