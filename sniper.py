@@ -10,6 +10,7 @@ Uses WebSocket for real-time order book updates.
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -43,6 +44,10 @@ PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 FUNDER = os.getenv("FUNDER_ADDRESS")
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "5000"))
 
+# Price buffer safety check - block trades when crypto price is too close to threshold
+MIN_PRICE_BUFFER_PCT = float(os.getenv("MIN_PRICE_BUFFER_PCT", "0.5"))  # Minimum % distance from "price to beat"
+CRYPTO_SYMBOLS = {"bitcoin": "BTCUSDT", "ethereum": "ETHUSDT", "solana": "SOLUSDT"}
+BINANCE_PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
 
 # Strategy Configuration
 MONITORED_ASSETS = ["bitcoin", "ethereum", "solana"]
@@ -338,11 +343,77 @@ def fetch_market_by_slug(slug: str) -> dict | None:
         return None
 
 
+def parse_price_to_beat(question: str) -> float | None:
+    """Extract the 'price to beat' dollar amount from a market question string.
+
+    E.g. "Will Bitcoin be above $70,703.29 at 12:30AM ET?" -> 70703.29
+    Returns None if no price found (fail-open: trade proceeds).
+    """
+    match = re.search(r'\$([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?)', question)
+    if match:
+        try:
+            return float(match.group(1).replace(',', ''))
+        except ValueError:
+            return None
+    return None
+
+
+def fetch_crypto_price(asset: str) -> float | None:
+    """Fetch current price for a crypto asset from Binance public API.
+    Returns None on any failure (fail-open).
+    """
+    symbol = CRYPTO_SYMBOLS.get(asset)
+    if not symbol:
+        return None
+    try:
+        resp = requests.get(BINANCE_PRICE_URL, params={"symbol": symbol}, timeout=3)
+        if resp.status_code == 200:
+            return float(resp.json().get("price", 0))
+        return None
+    except Exception:
+        return None
+
+
+def check_price_buffer(asset: str, question: str, bet_side: str) -> tuple[bool, str]:
+    """Check if current crypto price has sufficient buffer from the 'price to beat'.
+
+    Returns (is_safe, reason). Fail-open: returns (True, ...) if data unavailable.
+    """
+    price_to_beat = parse_price_to_beat(question)
+    if price_to_beat is None:
+        return (True, "Could not parse price-to-beat (fail-open)")
+
+    current_price = fetch_crypto_price(asset)
+    if current_price is None:
+        return (True, "Could not fetch crypto price (fail-open)")
+
+    buffer_pct = ((current_price - price_to_beat) / price_to_beat) * 100
+    abs_buffer = abs(buffer_pct)
+
+    if bet_side == "UP":
+        if buffer_pct > 0 and abs_buffer >= MIN_PRICE_BUFFER_PCT:
+            return (True, f"SAFE: ${current_price:,.2f} is {buffer_pct:+.2f}% above ${price_to_beat:,.2f}")
+        elif buffer_pct > 0:
+            return (False, f"TOO CLOSE: ${current_price:,.2f} only {buffer_pct:+.2f}% above ${price_to_beat:,.2f} (need {MIN_PRICE_BUFFER_PCT}%)")
+        else:
+            return (False, f"WRONG DIR: ${current_price:,.2f} is {buffer_pct:+.2f}% below ${price_to_beat:,.2f}")
+    elif bet_side == "DOWN":
+        if buffer_pct < 0 and abs_buffer >= MIN_PRICE_BUFFER_PCT:
+            return (True, f"SAFE: ${current_price:,.2f} is {abs_buffer:.2f}% below ${price_to_beat:,.2f}")
+        elif buffer_pct < 0:
+            return (False, f"TOO CLOSE: ${current_price:,.2f} only {abs_buffer:.2f}% below ${price_to_beat:,.2f} (need {MIN_PRICE_BUFFER_PCT}%)")
+        else:
+            return (False, f"WRONG DIR: ${current_price:,.2f} is {buffer_pct:+.2f}% above ${price_to_beat:,.2f}")
+
+    return (True, f"Unknown side '{bet_side}' (fail-open)")
+
+
 class SniperMonitor:
     """WebSocket-based order book monitor for sniping near resolution."""
     
-    def __init__(self, market_info: dict, asset_label: str = "", interval_end_unix: int = 0):
+    def __init__(self, market_info: dict, asset_label: str = "", interval_end_unix: int = 0, asset_name: str = ""):
         self.asset_label = asset_label.upper()
+        self.asset_name = asset_name or asset_label.lower()
         self.market_info = market_info
         self.interval_end_unix = interval_end_unix
         self.question = market_info.get('question', '')
@@ -560,6 +631,16 @@ class SniperMonitor:
                 opportunity = self.get_best_opportunity(target)
 
                 if opportunity:
+                    # Price buffer safety check - verify crypto price isn't too close to threshold
+                    is_safe, buffer_reason = check_price_buffer(
+                        self.asset_name, self.question, opportunity["side"]
+                    )
+                    if not is_safe:
+                        status += f"🛡️ {buffer_reason[:60]}"
+                        add_dashboard_error(self.asset_label, f"Buffer block: {buffer_reason}")
+                        _update_asset_status(self.asset_label, status)
+                        return
+
                     if EXECUTE_TRADES and AUTO_SNIPE:
                         # Check if already sniped, currently attempting, or in cooldown
                         with _trade_lock:
@@ -886,7 +967,7 @@ def monitor_asset(asset: str):
                 _update_asset_status(label, f"[{label}]".ljust(12) + f"| ✅ Found market, connecting...")
 
                 # Start WebSocket monitor (interval_end_unix already calculated above)
-                monitor = SniperMonitor(market, asset_label=label, interval_end_unix=interval_end_unix)
+                monitor = SniperMonitor(market, asset_label=label, interval_end_unix=interval_end_unix, asset_name=asset)
                 ws_thread = threading.Thread(target=monitor.run, daemon=True)
                 ws_thread.start()
 
