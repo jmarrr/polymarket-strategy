@@ -45,7 +45,12 @@ FUNDER = os.getenv("FUNDER_ADDRESS")
 DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "5000"))
 
 # Price buffer safety check - block trades when crypto price is too close to threshold
-MIN_PRICE_BUFFER_PCT = 1.0  # Minimum % distance from "price to beat"
+MIN_PRICE_BUFFER_PCT = {
+    "bitcoin": 0.5,
+    "ethereum": 0.5,
+    "solana": 0.8,
+    "xrp": 1.5,
+}
 CRYPTO_SYMBOLS = {"bitcoin": "BTCUSDT", "ethereum": "ETHUSDT", "solana": "SOLUSDT", "xrp": "XRPUSDT"}
 BINANCE_PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
 
@@ -389,21 +394,22 @@ def check_price_buffer(asset: str, question: str, bet_side: str) -> tuple[bool, 
     if current_price is None:
         return (True, "Could not fetch crypto price (fail-open)")
 
+    min_buffer = MIN_PRICE_BUFFER_PCT.get(asset, 1.0)
     buffer_pct = ((current_price - price_to_beat) / price_to_beat) * 100
     abs_buffer = abs(buffer_pct)
 
     if bet_side == "UP":
-        if buffer_pct > 0 and abs_buffer >= MIN_PRICE_BUFFER_PCT:
+        if buffer_pct > 0 and abs_buffer >= min_buffer:
             return (True, f"SAFE: ${current_price:,.2f} is {buffer_pct:+.2f}% above ${price_to_beat:,.2f}")
         elif buffer_pct > 0:
-            return (False, f"TOO CLOSE: ${current_price:,.2f} only {buffer_pct:+.2f}% above ${price_to_beat:,.2f} (need {MIN_PRICE_BUFFER_PCT}%)")
+            return (False, f"TOO CLOSE: ${current_price:,.2f} only {buffer_pct:+.2f}% above ${price_to_beat:,.2f} (need {min_buffer}%)")
         else:
             return (False, f"WRONG DIR: ${current_price:,.2f} is {buffer_pct:+.2f}% below ${price_to_beat:,.2f}")
     elif bet_side == "DOWN":
-        if buffer_pct < 0 and abs_buffer >= MIN_PRICE_BUFFER_PCT:
+        if buffer_pct < 0 and abs_buffer >= min_buffer:
             return (True, f"SAFE: ${current_price:,.2f} is {abs_buffer:.2f}% below ${price_to_beat:,.2f}")
         elif buffer_pct < 0:
-            return (False, f"TOO CLOSE: ${current_price:,.2f} only {abs_buffer:.2f}% below ${price_to_beat:,.2f} (need {MIN_PRICE_BUFFER_PCT}%)")
+            return (False, f"TOO CLOSE: ${current_price:,.2f} only {abs_buffer:.2f}% below ${price_to_beat:,.2f} (need {min_buffer}%)")
         else:
             return (False, f"WRONG DIR: ${current_price:,.2f} is {buffer_pct:+.2f}% above ${price_to_beat:,.2f}")
 
