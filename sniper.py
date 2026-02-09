@@ -740,7 +740,7 @@ class SniperMonitor:
                             self._discord_notified = True
                             send_discord_notification(
                                 f"🛡️ Buffer Block - {self.asset_label}",
-                                f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Reason:** {buffer_reason}",
+                                f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Timer:** {total_secs}s\n**Target:** ${target:.2f}\n**Reason:** {buffer_reason}",
                                 color=0xfbbf24,
                             )
                         _update_asset_status(self.asset_label, status)
@@ -759,7 +759,7 @@ class SniperMonitor:
                                 self._discord_notified = True
                                 send_discord_notification(
                                     f"📉 Momentum Block - {self.asset_label}",
-                                    f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Reason:** {momentum_reason}",
+                                    f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Timer:** {total_secs}s\n**Target:** ${target:.2f}\n**Reason:** {momentum_reason}",
                                     color=0xfbbf24,
                                 )
                             _update_asset_status(self.asset_label, status)
@@ -802,9 +802,12 @@ class SniperMonitor:
                                     self.snipe_executed = True
                                 status += "✅ SNIPED!"
                                 cost = int(MAX_POSITION_SIZE / opportunity["price"]) * opportunity["price"]
+                                crypto_str = f"${cp:,.2f}" if cp else "N/A"
+                                threshold_str = f"${ptb:,.2f}" if ptb else "N/A"
+                                buffer_str = f"{bp:+.2f}%" if bp is not None else "N/A"
                                 send_discord_notification(
                                     f"✅ Trade Executed - {self.asset_label}",
-                                    f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Cost:** ~${cost:.2f}",
+                                    f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Cost:** ~${cost:.2f}\n**Timer:** {total_secs}s\n**Target:** ${target:.2f}\n**Crypto:** {crypto_str}\n**Threshold:** {threshold_str}\n**Buffer:** {buffer_str}",
                                     color=0x4ade80,
                                 )
                             else:
@@ -813,9 +816,12 @@ class SniperMonitor:
                                 status += f"❌ Failed (cooldown {self.snipe_cooldown}s)"
                                 if not self._discord_notified:
                                     self._discord_notified = True
+                                    crypto_str = f"${cp:,.2f}" if cp else "N/A"
+                                    threshold_str = f"${ptb:,.2f}" if ptb else "N/A"
+                                    buffer_str = f"{bp:+.2f}%" if bp is not None else "N/A"
                                     send_discord_notification(
                                         f"❌ Trade Failed - {self.asset_label}",
-                                        f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Cooldown:** {self.snipe_cooldown}s",
+                                        f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Timer:** {total_secs}s\n**Target:** ${target:.2f}\n**Crypto:** {crypto_str}\n**Threshold:** {threshold_str}\n**Buffer:** {buffer_str}\n**Cooldown:** {self.snipe_cooldown}s",
                                         color=0xef4444,
                                     )
                         finally:
