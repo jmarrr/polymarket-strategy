@@ -5,7 +5,7 @@ Strategy: Monitor crypto 15-minute markets and buy when:
 - Either UP or DOWN hits the target price
 - Let it resolve to $1.00 for profit
 
-Supports: Bitcoin, Ethereum, Solana, XRP
+Supports: Bitcoin (BTC-only)
 Uses WebSocket for real-time order book updates.
 """
 
@@ -47,7 +47,7 @@ DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "5000"))
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")  # Set in .env to enable
 
 # Strategy Configuration
-MONITORED_ASSETS = ["bitcoin", "ethereum", "solana", "xrp"]
+MONITORED_ASSETS = ["bitcoin"]
 
 # Time-based target price tiers (seconds_threshold, target_price)
 # More aggressive closer to resolution, conservative early
@@ -377,7 +377,6 @@ class SniperMonitor:
         self.asset_name = asset_name or asset_label.lower()
         self.market_info = market_info
         self.interval_end_unix = interval_end_unix
-        self.question = market_info.get('question', '') or market_info.get('title', '') or market_info.get('description', '')
         self.outcomes = json.loads(market_info.get("outcomes", "[]"))
         self.token_ids = json.loads(market_info.get("clobTokenIds", "[]"))
         
@@ -642,18 +641,6 @@ class SniperMonitor:
                         finally:
                             self._attempting_snipe = False
                         _update_asset_status(self.asset_label, status)
-                    elif EXECUTE_TRADES:
-                        status += f"🎯 {opportunity['side']} @ ${opportunity['price']:.2f}"
-                        _update_asset_status(self.asset_label, status)
-                        confirm = input("\n   Execute snipe? (y/n): ").strip().lower()
-                        if confirm == "y":
-                            success = execute_snipe(opportunity, target_price=target, monitor_label=self.asset_label)
-                            if success:
-                                self.snipe_executed = True
-                                status = f"[{self.asset_label}]".ljust(12) + f"⏱️ {mins:02d}:{secs:02d} | 🎯 ${target:.2f} | UP: ${self.up_price:.2f} | DOWN: ${self.down_price:.2f} | ✅ SNIPED!"
-                                _update_asset_status(self.asset_label, status)
-                    else:
-                        _update_asset_status(self.asset_label, f"[{self.asset_label}]".ljust(12) + "| ⚠️ Trading disabled")
                     return
         elif self.snipe_executed:
             status += "✅ SNIPED!"
@@ -956,10 +943,6 @@ def monitor_asset(asset: str):
                     continue
 
                 market = open_markets[0]
-                # Carry event-level title/question into the market dict for price parsing
-                event_question = event_data.get("title", "") or event_data.get("question", "")
-                if event_question and not market.get("question"):
-                    market["question"] = event_question
                 _update_asset_status(label, f"[{label}]".ljust(12) + f"| ✅ Found market, connecting...")
 
                 # Start WebSocket monitor (interval_end_unix already calculated above)
