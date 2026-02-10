@@ -5,7 +5,7 @@ Strategy: Monitor crypto 15-minute markets and buy when:
 - Either UP or DOWN hits the target price
 - Let it resolve to $1.00 for profit
 
-Supports: Bitcoin (BTC-only)
+Supports: Bitcoin, Ethereum, Solana, XRP
 Uses WebSocket for real-time order book updates.
 """
 
@@ -47,7 +47,7 @@ DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "5000"))
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")  # Set in .env to enable
 
 # Strategy Configuration
-MONITORED_ASSETS = ["bitcoin"]
+MONITORED_ASSETS = ["bitcoin", "ethereum", "solana", "xrp"]
 
 # Time-based target price tiers (seconds_threshold, target_price)
 # More aggressive closer to resolution, conservative early
