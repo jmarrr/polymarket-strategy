@@ -93,43 +93,6 @@ _position_lock = threading.Lock()
 MAX_TOTAL_EXPOSURE = 500  # Maximum total USDC across all positions
 _balance_exhausted = False  # Set True on insufficient funds — stops all trading
 
-# PnL tracking
-PNL_FILE = Path("logs/pnl.json")
-_pnl_history = []
-_pnl_lock = threading.Lock()
-
-def _load_pnl_history():
-    """Load PnL history from disk."""
-    global _pnl_history
-    try:
-        if PNL_FILE.exists():
-            _pnl_history = json.loads(PNL_FILE.read_text())
-    except Exception:
-        _pnl_history = []
-
-def _save_pnl_history():
-    """Save PnL history to disk."""
-    try:
-        PNL_FILE.parent.mkdir(parents=True, exist_ok=True)
-        PNL_FILE.write_text(json.dumps(_pnl_history, indent=2))
-    except Exception:
-        pass
-
-def get_pnl_summary() -> dict:
-    """Get cumulative PnL stats."""
-    with _pnl_lock:
-        wins = sum(1 for t in _pnl_history if t.get("pnl", 0) > 0)
-        losses = sum(1 for t in _pnl_history if t.get("pnl", 0) < 0)
-        total_pnl = sum(t.get("pnl", 0) for t in _pnl_history)
-        total = wins + losses
-        return {
-            "total_pnl": total_pnl,
-            "wins": wins,
-            "losses": losses,
-            "win_rate": (wins / total * 100) if total > 0 else 0,
-            "total_trades": total,
-        }
-
 # Trade logger
 _trade_logger = None
 
@@ -144,8 +107,7 @@ _dashboard_data = {
         "max_position": MAX_POSITION_SIZE,
         "max_exposure": MAX_TOTAL_EXPOSURE,
         "auto_snipe": AUTO_SNIPE,
-    },
-    "pnl": {"total_pnl": 0, "wins": 0, "losses": 0, "win_rate": 0, "total_trades": 0},
+    }
 }
 _dashboard_lock = threading.Lock()
 
@@ -212,119 +174,6 @@ def clear_position(asset: str):
             cost = _positions[asset].get("cost", 0)
             _total_exposure = max(0, _total_exposure - cost)
             del _positions[asset]
-
-
-def determine_resolution(slug: str) -> str | None:
-    """Fetch market and determine which side won (resolved to $1).
-    Returns "UP", "DOWN", or None if not yet resolved.
-    """
-    try:
-        event_data = fetch_market_by_slug(slug)
-        if not event_data:
-            return None
-
-        markets = event_data.get("markets", [])
-        if not markets:
-            return None
-
-        market = markets[0]
-        outcomes = json.loads(market.get("outcomes", "[]"))
-        outcome_prices = market.get("outcomePrices")
-        if outcome_prices:
-            prices = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
-            if len(prices) >= 2:
-                outcome_0 = outcomes[0].lower() if outcomes else ""
-                up_idx = 0 if outcome_0 in ("yes", "up") else 1
-                down_idx = 1 if up_idx == 0 else 0
-
-                up_price = float(prices[up_idx]) if prices[up_idx] else 0
-                down_price = float(prices[down_idx]) if prices[down_idx] else 0
-
-                if up_price > 0.9:
-                    return "UP"
-                elif down_price > 0.9:
-                    return "DOWN"
-
-        return None
-    except Exception:
-        return None
-
-
-def resolve_and_clear_position(asset: str, slug: str):
-    """Check resolution for the completed interval, record PnL, then clear position."""
-    with _position_lock:
-        position = _positions.get(asset)
-    if not position:
-        clear_position(asset)
-        return
-
-    side = position["side"]
-    size = position["size"]
-    price = position["price"]
-    cost = position["cost"]
-
-    # Retry resolution check — market may take a few seconds to settle
-    resolution = None
-    for attempt in range(3):
-        resolution = determine_resolution(slug)
-        if resolution:
-            break
-        time.sleep(2)
-
-    if resolution is None:
-        # Could not determine — log as unknown
-        print(f"⚠️  Could not determine resolution for {asset} ({slug})")
-        clear_position(asset)
-        return
-
-    won = (side == resolution)
-    pnl = (size * 1.00) - cost if won else -cost
-
-    # Record to history
-    record = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "asset": asset,
-        "slug": slug,
-        "side": side,
-        "resolution": resolution,
-        "won": won,
-        "entry_price": price,
-        "size": size,
-        "cost": round(cost, 2),
-        "pnl": round(pnl, 2),
-    }
-    with _pnl_lock:
-        _pnl_history.append(record)
-        _save_pnl_history()
-
-    summary = get_pnl_summary()
-
-    # Update dashboard
-    with _dashboard_lock:
-        _dashboard_data["pnl"] = summary
-
-    # Log to trade logger
-    if _trade_logger:
-        result = "WIN" if won else "LOSS"
-        _trade_logger.info(
-            f"{result} | {asset} | {side} | resolved={resolution} | "
-            f"${price:.4f} x {size} | pnl=${pnl:+.2f} | "
-            f"session=${summary['total_pnl']:+.2f} ({summary['wins']}W/{summary['losses']}L)"
-        )
-
-    # Discord notification
-    result_emoji = "✅" if won else "❌"
-    result_text = "WIN" if won else "LOSS"
-    color = 0x4ade80 if won else 0xef4444
-    send_discord_notification(
-        f"{result_emoji} {result_text} - {asset}",
-        f"**Side:** {side}\n**Resolution:** {resolution}\n**Entry:** ${price:.2f} x {size}\n**PnL:** ${pnl:+.2f}\n**Session:** ${summary['total_pnl']:+.2f} ({summary['wins']}W/{summary['losses']}L)",
-        color=color,
-    )
-
-    print(f"{'✅' if won else '❌'} {asset} {side} → {resolution} | PnL: ${pnl:+.2f} | Session: ${summary['total_pnl']:+.2f} ({summary['wins']}W/{summary['losses']}L)")
-
-    clear_position(asset)
 
 
 def _build_status_table() -> Table:
@@ -1067,11 +916,8 @@ def monitor_asset(asset: str):
                 global _balance_exhausted
                 _balance_exhausted = False
 
-                # Resolve position from previous interval and track PnL
-                if current_slug:
-                    resolve_and_clear_position(label, current_slug)
-                else:
-                    clear_position(label)
+                # Clear position from previous interval (it has resolved)
+                clear_position(label)
 
                 # Stop old monitor
                 if monitor:
@@ -1141,12 +987,6 @@ def monitor_all_assets():
     """Main entry point: monitor all configured assets in parallel."""
     global _live, _all_connected
 
-    # Load PnL history from disk
-    _load_pnl_history()
-    pnl = get_pnl_summary()
-    with _dashboard_lock:
-        _dashboard_data["pnl"] = pnl
-
     # Startup banner
     print(f"\n{'='*70}")
     print(f"🎯 MULTI-ASSET 15M RESOLUTION SNIPER (WebSocket)")
@@ -1158,8 +998,6 @@ def monitor_all_assets():
         print(f"   📊 Max position: ${MAX_POSITION_SIZE} per trade")
         print(f"   🤖 Auto-snipe: {AUTO_SNIPE}")
     print(f"   🔔 Discord: {'ON' if DISCORD_WEBHOOK_URL else 'OFF'}")
-    if pnl["total_trades"] > 0:
-        print(f"   📈 PnL: ${pnl['total_pnl']:+.2f} ({pnl['wins']}W/{pnl['losses']}L, {pnl['win_rate']:.0f}%)")
     print(f"\n   🛑 Press Ctrl+C to stop")
     print(f"{'='*70}\n")
     sys.stdout.flush()
