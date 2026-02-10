@@ -7,13 +7,12 @@ Collection of trading bots and tools for Polymarket prediction markets, primaril
 
 ## Key Files
 
-- `sniper.py` — BTC-only 15m resolution sniper. WebSocket-based, monitors order books and buys when price hits target. Includes built-in web dashboard on port 5000.
+- `sniper.py` — Multi-asset 15m resolution sniper. WebSocket-based, monitors order books and buys when price hits target. Discord notifications for trades.
 
 ## Environment Variables
 - `PRIVATE_KEY` — Polygon wallet private key for signing transactions
 - `FUNDER_ADDRESS` — Funder wallet address (Safe/proxy wallet)
 - `DISCORD_WEBHOOK_URL` — Discord webhook URL for trade notifications (optional)
-- `DASHBOARD_PORT` — Web dashboard port (default: 5000)
 
 ## APIs Used
 - **CLOB API** (`clob.polymarket.com`) — Order placement and order book queries via `py_clob_client`
@@ -24,7 +23,6 @@ Collection of trading bots and tools for Polymarket prediction markets, primaril
 - `py_clob_client` — Polymarket CLOB client (provides `ClobClient`, `OrderArgs`, `OrderType`)
 - `websocket-client` — WebSocket connections (`WebSocketApp`)
 - `requests` — HTTP calls to Gamma API
-- `flask` — Web dashboard server (integrated into sniper.py)
 - `rich` — Terminal display formatting
 
 ## sniper.py Architecture
@@ -35,7 +33,6 @@ Collection of trading bots and tools for Polymarket prediction markets, primaril
 - **FOK orders**: Fill-or-Kill orders require full fill or entire order is cancelled (no partial fills)
 - **Auto-reconnect**: Exponential backoff on WebSocket disconnect
 - **Thread safety**: `_trade_lock` for order execution, `_print_lock` for console output
-- **Dashboard integration**: Shares data with web dashboard via `_dashboard_data` dict
 - **Position tracking**: `MAX_TOTAL_EXPOSURE` limits total capital at risk
 - **Trade logging**: All trades logged to `logs/trades.log`
 
@@ -43,9 +40,7 @@ Collection of trading bots and tools for Polymarket prediction markets, primaril
 More aggressive targets as time runs out:
 ```python
 PRICE_TIERS = [
-    (60, 0.96),    # < 60s (1min): $0.96
-    (120, 0.97),   # < 120s (2min): $0.97
-    (300, 0.98),   # < 300s (5min): $0.98
+    (60, 0.98),    # < 60s (1min): $0.98
 ]
 ```
 
@@ -69,16 +64,13 @@ FUNDER_ADDRESS=your_funder_address
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the sniper (dashboard auto-starts on port 5000)
+# Run the sniper
 python sniper.py
-
-# Access dashboard
-http://localhost:5000
 ```
 
 ## Known Gotchas
 - WebSocket initial book snapshot contains stale prices (both sides ~$0.99). The `warmed_up` flag + price sum upper bound check (`<= 1.15`) guard against this. Do not remove both protections.
 - Illiquid markets may have low price sums (e.g. $0.24). The stale check only blocks HIGH sums to allow thin books through.
 - Market slugs follow the pattern `{asset}-updown-15m-{unix_timestamp}` (e.g. `btc-updown-15m-1770034500`).
-- FOK orders fail if liquidity is insufficient for full order — check dashboard error log for failed trades.
+- FOK orders fail if liquidity is insufficient for full order — check Discord/logs for failed trades.
 - **VPS does not work** — Polymarket uses Cloudflare bot protection that blocks datacenter IPs. Must run locally with residential IP.

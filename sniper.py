@@ -41,8 +41,6 @@ GAMMA_HOST = "https://gamma-api.polymarket.com"
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com"
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
 FUNDER = os.getenv("FUNDER_ADDRESS")
-DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "5000"))
-
 # Discord notifications
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")  # Set in .env to enable
 
@@ -95,21 +93,6 @@ _balance_exhausted = False  # Set True on insufficient funds — stops all tradi
 
 # Trade logger
 _trade_logger = None
-
-# Dashboard data (shared with web dashboard)
-_dashboard_data = {
-    "assets": {},      # {BITCOIN: {timer, target, up_price, up_size, down_price, down_size, status}}
-    "trades": [],      # Recent trades list (last 50)
-    "errors": [],      # Recent errors (last 20)
-    "updated": "",     # Timestamp
-    "config": {
-        "execute_trades": EXECUTE_TRADES,
-        "max_position": MAX_POSITION_SIZE,
-        "max_exposure": MAX_TOTAL_EXPOSURE,
-        "auto_snipe": AUTO_SNIPE,
-    }
-}
-_dashboard_lock = threading.Lock()
 
 
 def _setup_trade_logger():
@@ -206,58 +189,6 @@ def _refresh_status():
         except Exception:
             pass  # Ignore display errors
 
-
-def update_dashboard_asset(label: str, timer: str, target: float | None,
-                           up_price: float, up_size: float,
-                           down_price: float, down_size: float,
-                           status: str = ""):
-    """Update dashboard data for an asset."""
-    with _dashboard_lock:
-        _dashboard_data["assets"][label] = {
-            "timer": timer,
-            "target": target if target else 0.0,
-            "up_price": up_price,
-            "up_size": int(up_size),
-            "down_price": down_price,
-            "down_size": int(down_size),
-            "status": status,
-        }
-        _dashboard_data["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def add_dashboard_trade(label: str, side: str, price: float, size: int, success: bool):
-    """Add a trade to dashboard history."""
-    with _dashboard_lock:
-        trade = {
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "asset": label,
-            "side": side,
-            "price": price,
-            "size": size,
-            "success": success,
-        }
-        _dashboard_data["trades"].insert(0, trade)
-        # Keep only last 50 trades
-        _dashboard_data["trades"] = _dashboard_data["trades"][:50]
-
-
-def add_dashboard_error(label: str, message: str):
-    """Add an error to dashboard error log."""
-    with _dashboard_lock:
-        error = {
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "asset": label,
-            "message": message,
-        }
-        _dashboard_data["errors"].insert(0, error)
-        # Keep only last 20 errors
-        _dashboard_data["errors"] = _dashboard_data["errors"][:20]
-
-
-def get_dashboard_data() -> dict:
-    """Get a copy of dashboard data (thread-safe)."""
-    with _dashboard_lock:
-        return json.loads(json.dumps(_dashboard_data))
 
 
 def _update_asset_status(label: str, status: str):
@@ -564,17 +495,6 @@ class SniperMonitor:
         if self.warmed_up and (not prices_valid and time_since_resync > 3) or (time_since_resync > 30):
             self.resync_orderbook()
 
-        # Update dashboard data
-        timer_str = f"{mins:02d}:{secs:02d}"
-        in_cooldown = self.last_snipe_attempt > 0 and (time.time() - self.last_snipe_attempt) < self.snipe_cooldown
-        dash_status = "sniped" if self.snipe_executed else ("cooldown" if in_cooldown else ("warming" if not self.warmed_up else ("waiting" if not in_trading_window else ("stale" if not prices_valid else "monitoring"))))
-        update_dashboard_asset(
-            self.asset_label, timer_str, target,
-            self.up_price, self.up_size,
-            self.down_price, self.down_size,
-            dash_status
-        )
-
         # Check if price hits target
         if not self.snipe_executed:
             if not self.warmed_up:
@@ -800,7 +720,6 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         return False
 
     if _balance_exhausted:
-        add_dashboard_error(label, "Trading halted - insufficient funds")
         return False
 
     # Check liquidity before doing anything
@@ -833,7 +752,6 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         # Check position limit
         cost = size * price
         if not can_open_position(cost):
-            add_dashboard_error(label, f"Max exposure reached (${get_total_exposure():.0f}/${MAX_TOTAL_EXPOSURE})")
             return False
 
         # Create and execute order
@@ -857,9 +775,6 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
                   time_remaining=ctx.get("time_remaining"),
                   target_price=ctx.get("target_price"))
 
-        # Add to dashboard
-        add_dashboard_trade(label, opportunity["side"], price, size, success)
-
         # Record position if successful
         if success:
             record_position(monitor_label or "UNKNOWN", opportunity["side"], size, price)
@@ -870,10 +785,8 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         error_str = str(e)
         # On 403 error, refresh credentials and retry once
         if "403" in error_str and not _retry:
-            add_dashboard_error(label, "403 error - refreshing credentials...")
             get_trading_client(force_refresh=True)
             return execute_snipe(opportunity, size, target_price, monitor_label, _retry=True, trade_context=trade_context)
-        add_dashboard_error(label, f"Exception: {error_str}")
         # Ping @everyone for insufficient funds or balance errors
         error_lower = error_str.lower()
         if any(kw in error_lower for kw in ["insufficient", "balance", "fund", "allowance"]):
@@ -1036,40 +949,8 @@ def monitor_all_assets():
         print(f"{'='*70}")
 
 
-def start_dashboard_server(host='0.0.0.0', port=5000):
-    """Start the Flask dashboard server in a background thread."""
-    from flask import Flask, render_template, jsonify
-
-    app = Flask(__name__)
-
-    @app.route('/')
-    def index():
-        return render_template('dashboard.html')
-
-    @app.route('/api/status')
-    def api_status():
-        return jsonify(get_dashboard_data())
-
-    # Suppress Flask's request logging
-    import logging
-    log = logging.getLogger('werkzeug')
-    log.setLevel(logging.ERROR)
-
-    print(f"\n🌐 Dashboard running at http://{host}:{port}\n")
-    app.run(host=host, port=port, debug=False, threaded=True, use_reloader=False)
-
-
 def main():
     """Main entry point."""
-    # Start dashboard server in background thread
-    dashboard_thread = threading.Thread(
-        target=start_dashboard_server,
-        kwargs={'host': '0.0.0.0', 'port': DASHBOARD_PORT},
-        daemon=True
-    )
-    dashboard_thread.start()
-
-    # Run the main monitoring loop
     monitor_all_assets()
 
 
