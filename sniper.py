@@ -5,7 +5,7 @@ Strategy: Monitor crypto up/down markets and buy when:
 - Either UP or DOWN hits the target price
 - Let it resolve to $1.00 for profit
 
-Supports: Bitcoin, Ethereum, Solana, XRP (15m and 5m intervals)
+Supports: Bitcoin, Ethereum, Solana (15m and 5m intervals)
 Uses WebSocket for real-time order book updates.
 """
 
@@ -49,20 +49,20 @@ MONITORED_ASSETS = [
     ("bitcoin", 15),
     ("ethereum", 15),
     ("solana", 15),
-    ("xrp", 15),
     ("bitcoin", 5),
 ]
 
-# Time-based target price tiers (seconds_threshold, target_price)
-# More aggressive closer to resolution, conservative early
-PRICE_TIERS = [
-    (60, 0.98),
-]
+# Per-interval price tiers: {interval_minutes: [(seconds_threshold, target_price), ...]}
+PRICE_TIERS = {
+    15: [(60, 0.98)],
+    5:  [(30, 0.98)],
+}
 
 
-def get_target_price(seconds_remaining: int) -> float | None:
+def get_target_price(seconds_remaining: int, interval_minutes: int = 15) -> float | None:
     """Get target price based on time remaining until resolution. Returns None if not in trading window."""
-    for threshold, price in PRICE_TIERS:
+    tiers = PRICE_TIERS.get(interval_minutes, [])
+    for threshold, price in tiers:
         if seconds_remaining < threshold:
             return price
     return None  # Not in active trading window
@@ -82,7 +82,7 @@ _console = Console()
 _live = None  # Will be initialized in main
 
 # Per-asset status data (for rich table)
-_asset_status = {}  # {label: {timer, target, up_price, up_size, down_price, down_size, status}}
+_asset_status = {}  # {label: status_string}
 _asset_order = []   # ordered list of labels for consistent display
 
 # Gate output until all WebSockets are connected
@@ -148,11 +148,6 @@ def record_position(asset: str, side: str, size: int, price: float):
         _positions[asset] = {"side": side, "size": size, "price": price, "cost": cost}
         _total_exposure += cost
 
-
-def get_total_exposure() -> float:
-    """Get current total exposure across all positions."""
-    with _position_lock:
-        return _total_exposure
 
 
 def clear_position(asset: str):
@@ -309,9 +304,10 @@ def send_discord_notification(title: str, message: str, color: int = 0x667eea, p
 class SniperMonitor:
     """WebSocket-based order book monitor for sniping near resolution."""
     
-    def __init__(self, market_info: dict, asset_label: str = "", interval_end_unix: int = 0, asset_name: str = ""):
+    def __init__(self, market_info: dict, asset_label: str = "", interval_end_unix: int = 0, asset_name: str = "", interval_minutes: int = 15):
         self.asset_label = asset_label.upper()
         self.asset_name = asset_name or asset_label.lower()
+        self.interval_minutes = interval_minutes
         self.market_info = market_info
         self.interval_end_unix = interval_end_unix
         self.outcomes = json.loads(market_info.get("outcomes", "[]"))
@@ -333,9 +329,8 @@ class SniperMonitor:
         self.warmed_up = False  # Skip initial stale book snapshots
         self.stopped = False
         self.last_snipe_attempt = 0  # Timestamp of last attempt
-        self.snipe_cooldown = 1  # Seconds to wait after failed attempt
+        self.snipe_cooldown = 0.5  # Seconds to wait after failed attempt
         self._attempting_snipe = False  # Flag to prevent concurrent snipe attempts
-        self._bad_price_count = 0  # Counter for unrealistic price sums
         self._last_resync = 0  # Timestamp of last resync attempt
         self._discord_notified = False  # Only send one Discord alert per slug
 
@@ -476,7 +471,7 @@ class SniperMonitor:
         secs = total_secs % 60
 
         # Get dynamic target price based on time remaining (None = not in trading window)
-        target = get_target_price(total_secs)
+        target = get_target_price(total_secs, self.interval_minutes)
         in_trading_window = target is not None
 
         # Build status line (pad tag to align columns)
@@ -661,7 +656,6 @@ class SniperMonitor:
             # Clear current orderbook
             self.orderbooks = {}
             self.warmed_up = False
-            self._bad_price_count = 0
             self._last_resync = time.time()
             # Re-send subscription
             subscribe_msg = {
@@ -866,7 +860,7 @@ def monitor_asset(asset: str, interval_minutes: int = 15):
                 _update_asset_status(label, f"[{label}]".ljust(12) + f"| ✅ Found market, connecting...")
 
                 # Start WebSocket monitor (interval_end_unix already calculated above)
-                monitor = SniperMonitor(market, asset_label=label, interval_end_unix=interval_end_unix, asset_name=asset)
+                monitor = SniperMonitor(market, asset_label=label, interval_end_unix=interval_end_unix, asset_name=asset, interval_minutes=interval_minutes)
                 ws_thread = threading.Thread(target=monitor.run, daemon=True)
                 ws_thread.start()
 
@@ -895,7 +889,8 @@ def monitor_all_assets():
     print(f"🎯 MULTI-ASSET RESOLUTION SNIPER (WebSocket)")
     print(f"{'='*70}")
     print(f"   Markets: {', '.join(f'{a.upper()}-{m}M' for a, m in MONITORED_ASSETS)}")
-    print(f"   Targets: {', '.join(f'${p:.2f} (<{t}s)' for t, p in PRICE_TIERS)}")
+    for iv, tiers in PRICE_TIERS.items():
+        print(f"   Targets ({iv}m): {', '.join(f'${p:.2f} (<{t}s)' for t, p in tiers)}")
     print(f"\n   💰 Trading: {'ENABLED' if EXECUTE_TRADES else 'DISABLED'}")
     if EXECUTE_TRADES:
         print(f"   📊 Max position: ${MAX_POSITION_SIZE} per trade")
