@@ -1,11 +1,11 @@
 """
-Multi-Asset 15m Resolution Sniper for Polymarket
+Multi-Asset Resolution Sniper for Polymarket
 
-Strategy: Monitor crypto 15-minute markets and buy when:
+Strategy: Monitor crypto up/down markets and buy when:
 - Either UP or DOWN hits the target price
 - Let it resolve to $1.00 for profit
 
-Supports: Bitcoin, Ethereum, Solana, XRP
+Supports: Bitcoin, Ethereum, Solana, XRP (15m and 5m intervals)
 Uses WebSocket for real-time order book updates.
 """
 
@@ -44,8 +44,14 @@ FUNDER = os.getenv("FUNDER_ADDRESS")
 # Discord notifications
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")  # Set in .env to enable
 
-# Strategy Configuration
-MONITORED_ASSETS = ["bitcoin", "ethereum", "solana", "xrp"]
+# Strategy Configuration — (asset_name, interval_minutes)
+MONITORED_ASSETS = [
+    ("bitcoin", 15),
+    ("ethereum", 15),
+    ("solana", 15),
+    ("xrp", 15),
+    ("bitcoin", 5),
+]
 
 # Time-based target price tiers (seconds_threshold, target_price)
 # More aggressive closer to resolution, conservative early
@@ -226,19 +232,19 @@ def get_current_et_time():
         return utc_now + et_offset
 
 
-def get_15m_interval_timestamp() -> int:
-    """Get Unix timestamp for the current 15-minute interval."""
+def get_interval_timestamp(interval_minutes: int = 15) -> int:
+    """Get Unix timestamp for the current interval (5m, 15m, etc)."""
     et_now = get_current_et_time()
-    minute = (et_now.minute // 15) * 15
+    minute = (et_now.minute // interval_minutes) * interval_minutes
     interval_time = et_now.replace(minute=minute, second=0, microsecond=0)
     return int(interval_time.timestamp())
 
 
-def generate_market_slug(base: str = "bitcoin") -> str:
-    """Generate market slug for current 15-minute interval."""
+def generate_market_slug(base: str = "bitcoin", interval_minutes: int = 15) -> str:
+    """Generate market slug for current interval."""
     base_short = {"bitcoin": "btc", "ethereum": "eth", "solana": "sol", "xrp": "xrp"}.get(base, base)
-    timestamp = get_15m_interval_timestamp()
-    return f"{base_short}-updown-15m-{timestamp}"
+    timestamp = get_interval_timestamp(interval_minutes)
+    return f"{base_short}-updown-{interval_minutes}m-{timestamp}"
 
 
 def fetch_market_by_slug(slug: str) -> dict | None:
@@ -800,15 +806,16 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         return False
 
 
-def monitor_asset(asset: str):
-    """Monitor loop for a single asset. Runs in its own thread."""
-    label = asset.upper()
+def monitor_asset(asset: str, interval_minutes: int = 15):
+    """Monitor loop for a single asset+interval. Runs in its own thread."""
+    label = f"{asset.upper()}-{interval_minutes}M"
+    interval_seconds = interval_minutes * 60
     current_slug = None
     monitor = None
 
     while True:
         try:
-            slug = generate_market_slug(asset)
+            slug = generate_market_slug(asset, interval_minutes)
 
             # Check if we moved to a new interval
             if slug != current_slug:
@@ -827,7 +834,7 @@ def monitor_asset(asset: str):
                 current_slug = slug
                 # Calculate minutes remaining from slug timestamp
                 slug_timestamp = int(slug.split("-")[-1])
-                interval_end_unix = slug_timestamp + 900
+                interval_end_unix = slug_timestamp + interval_seconds
                 minutes_left = max(0, (interval_end_unix - int(time.time())) / 60)
                 _update_asset_status(label, f"[{label}]".ljust(12) + f"| 🆕 New interval | Closes in {minutes_left:.1f}min")
 
@@ -865,7 +872,7 @@ def monitor_asset(asset: str):
 
                 # Monitor thread and check for interval end
                 while ws_thread.is_alive():
-                    new_slug = generate_market_slug(asset)
+                    new_slug = generate_market_slug(asset, interval_minutes)
                     if new_slug != current_slug:
                         _update_asset_status(label, f"[{label}]".ljust(12) + "| 🔄 Interval ended, switching...")
                         monitor.stop()
@@ -885,9 +892,9 @@ def monitor_all_assets():
 
     # Startup banner
     print(f"\n{'='*70}")
-    print(f"🎯 MULTI-ASSET 15M RESOLUTION SNIPER (WebSocket)")
+    print(f"🎯 MULTI-ASSET RESOLUTION SNIPER (WebSocket)")
     print(f"{'='*70}")
-    print(f"   Assets: {', '.join(a.upper() for a in MONITORED_ASSETS)}")
+    print(f"   Markets: {', '.join(f'{a.upper()}-{m}M' for a, m in MONITORED_ASSETS)}")
     print(f"   Targets: {', '.join(f'${p:.2f} (<{t}s)' for t, p in PRICE_TIERS)}")
     print(f"\n   💰 Trading: {'ENABLED' if EXECUTE_TRADES else 'DISABLED'}")
     if EXECUTE_TRADES:
@@ -908,10 +915,10 @@ def monitor_all_assets():
             print(f"❌ Failed to init trading client: {e}\n")
         sys.stdout.flush()
 
-    # Start one thread per asset
+    # Start one thread per asset+interval
     threads = []
-    for asset in MONITORED_ASSETS:
-        t = threading.Thread(target=monitor_asset, args=(asset,), daemon=True)
+    for asset, interval in MONITORED_ASSETS:
+        t = threading.Thread(target=monitor_asset, args=(asset, interval), daemon=True)
         t.start()
         threads.append(t)
         time.sleep(0.5)  # Stagger starts to avoid API burst
