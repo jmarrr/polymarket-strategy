@@ -55,7 +55,7 @@ MONITORED_ASSETS = [
 # Per-interval price tiers: {interval_minutes: [(seconds_threshold, target_price), ...]}
 PRICE_TIERS = {
     15: [(60, 0.98)],
-    5:  [(30, 0.98)],
+    5:  [(20, 0.98)],
 }
 
 
