@@ -17,7 +17,7 @@ import logging
 import requests
 import threading
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from websocket import WebSocketApp
 
@@ -53,9 +53,10 @@ MONITORED_ASSETS = [
 ]
 
 # Per-interval price tiers: {interval_minutes: [(seconds_threshold, target_price), ...]}
+# Buy any side at >= target price in the last N seconds
 PRICE_TIERS = {
     15: [(60, 0.98)],
-    5:  [(20, 0.98)],
+    5:  [(10, 0.98)],
 }
 
 
@@ -69,7 +70,8 @@ def get_target_price(seconds_remaining: int, interval_minutes: int = 15) -> floa
 
 # Trading Configuration
 EXECUTE_TRADES = True  # Set to True to enable actual trading
-MAX_POSITION_SIZE = 100 # Maximum USDC per trade
+MAX_POSITION_SIZE = 10  # Maximum USDC per trade
+MIN_ORDER_VALUE = 5    # Skip trades below this USDC (not worth the fees)
 AUTO_SNIPE = True  # Automatically execute when opportunity found
 
 # Global trading client
@@ -87,6 +89,7 @@ _asset_order = []   # ordered list of labels for consistent display
 
 # Gate output until all WebSockets are connected
 _connected_count = 0
+_connected_lock = threading.Lock()
 _expected_connections = len(MONITORED_ASSETS)
 _all_connected = False
 
@@ -221,7 +224,6 @@ def get_current_et_time():
     try:
         return datetime.now(ZoneInfo("America/New_York"))
     except Exception:
-        from datetime import timezone
         utc_now = datetime.now(timezone.utc)
         et_offset = timedelta(hours=-5)  # EST
         return utc_now + et_offset
@@ -289,7 +291,7 @@ def send_discord_notification(title: str, message: str, color: int = 0x667eea, p
                     "title": title,
                     "description": message,
                     "color": color,
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 }]
             }
             if ping_everyone:
@@ -304,10 +306,11 @@ def send_discord_notification(title: str, message: str, color: int = 0x667eea, p
 class SniperMonitor:
     """WebSocket-based order book monitor for sniping near resolution."""
     
-    def __init__(self, market_info: dict, asset_label: str = "", interval_end_unix: int = 0, asset_name: str = "", interval_minutes: int = 15):
+    def __init__(self, market_info: dict, asset_label: str = "", interval_end_unix: int = 0, asset_name: str = "", interval_minutes: int = 15, slug: str = ""):
         self.asset_label = asset_label.upper()
         self.asset_name = asset_name or asset_label.lower()
         self.interval_minutes = interval_minutes
+        self.slug = slug
         self.market_info = market_info
         self.interval_end_unix = interval_end_unix
         self.outcomes = json.loads(market_info.get("outcomes", "[]"))
@@ -328,11 +331,9 @@ class SniperMonitor:
         self.snipe_executed = False
         self.warmed_up = False  # Skip initial stale book snapshots
         self.stopped = False
-        self.last_snipe_attempt = 0  # Timestamp of last attempt
-        self.snipe_cooldown = 0.5  # Seconds to wait after failed attempt
         self._attempting_snipe = False  # Flag to prevent concurrent snipe attempts
         self._last_resync = 0  # Timestamp of last resync attempt
-        self._discord_notified = False  # Only send one Discord alert per slug
+        self._retry_count = 0  # Number of failed attempts this interval
 
         # Current prices (updated in real-time)
         self.up_price = 0.0
@@ -386,17 +387,9 @@ class SniperMonitor:
                     "bids": event.get("bids", []),
                     "asks": event.get("asks", [])
                 }
-                # Check if we have both tokens and prices look valid
-                if self.up_token and self.down_token:
-                    up_book = self.orderbooks.get(self.up_token, {})
-                    down_book = self.orderbooks.get(self.down_token, {})
-                    up_asks = up_book.get("asks", [])
-                    down_asks = down_book.get("asks", [])
-                    if up_asks and down_asks:
-                        price_sum = float(up_asks[0]["price"]) + float(down_asks[0]["price"])
-                        # Trust snapshot if prices are valid (stale check still protects us)
-                        if price_sum <= 1.15:
-                            self.warmed_up = True
+                # Mark warmed up after receiving book snapshot
+                # prices_valid check in check_snipe_opportunity() handles stale data safety
+                self.warmed_up = True
                 self.check_snipe_opportunity()
 
             elif event_type == "price_change" and asset_id:
@@ -435,7 +428,7 @@ class SniperMonitor:
         self.orderbooks[asset_id] = book
     
     def check_snipe_opportunity(self):
-        """Check for snipe opportunity using WebSocket prices (REST verifies before trade)."""
+        """Check for snipe opportunity using WebSocket prices."""
         if not self.up_token or not self.down_token:
             return
 
@@ -478,6 +471,7 @@ class SniperMonitor:
         tag = f"[{self.asset_label}]" if self.asset_label else ""
         tag = tag.ljust(10)
         target_display = f"${target:.2f}" if target else "---"
+
         status = (
             f"{tag} "
             f"⏱️ {mins:02d}:{secs:02d} | "
@@ -486,14 +480,20 @@ class SniperMonitor:
             f"DOWN: ${self.down_price:.2f} | "
         )
 
-        # Sanity check: binary market prices should sum to ~$1.00
+        # Sanity check: stale snapshots show both sides at ~$0.99 (sum ~$1.98)
+        # Only check sum bounds when both sides have data; one-sided books are valid near resolution
         price_sum = self.up_price + self.down_price
-        prices_valid = 0.95 <= price_sum <= 1.05 and self.up_price > 0 and self.down_price > 0
+        if self.up_price > 0 and self.down_price > 0:
+            min_sum = 0.30 if self.interval_minutes == 5 else 0.95
+            prices_valid = min_sum <= price_sum <= 1.15
+        else:
+            prices_valid = self.up_price > 0 or self.down_price > 0
 
         # Auto-resync if prices are invalid (throttle to once per 3s)
         # Also resync every 30s regardless to catch silent WebSocket stalls
+        # But NEVER resync during the trading window — would clear orderbook at worst time
         time_since_resync = time.time() - self._last_resync
-        if self.warmed_up and (not prices_valid and time_since_resync > 3) or (time_since_resync > 30):
+        if not in_trading_window and self.warmed_up and ((not prices_valid and time_since_resync > 3) or (time_since_resync > 30)):
             self.resync_orderbook()
 
         # Check if price hits target
@@ -503,10 +503,8 @@ class SniperMonitor:
             elif not in_trading_window:
                 status += "⏳ Waiting ..."
             elif not prices_valid:
-                if self.up_price == 0 or self.down_price == 0:
-                    status += "⚠️ Invalid ($0 price)"
-                elif price_sum < 0.80:
-                    status += f"⚠️ Incomplete (sum=${price_sum:.2f})"
+                if self.up_price == 0 and self.down_price == 0:
+                    status += "⚠️ No orderbook data"
                 else:
                     status += f"⚠️ Stale (sum=${price_sum:.2f})"
             else:
@@ -523,13 +521,6 @@ class SniperMonitor:
                             if self._attempting_snipe:
                                 _update_asset_status(self.asset_label, status)
                                 return
-                            # Check cooldown after failed attempts
-                            now = time.time()
-                            if self.last_snipe_attempt > 0 and (now - self.last_snipe_attempt) < self.snipe_cooldown:
-                                remaining = int(self.snipe_cooldown - (now - self.last_snipe_attempt))
-                                status += f"⏳ Cooldown ({remaining}s)"
-                                _update_asset_status(self.asset_label, status)
-                                return
                             self._attempting_snipe = True
 
                         try:
@@ -537,28 +528,24 @@ class SniperMonitor:
                                 "time_remaining": total_secs,
                                 "target_price": target,
                             }
-                            success = execute_snipe(opportunity, target_price=target, monitor_label=self.asset_label, trade_context=trade_context)
-                            if success:
+                            trade_result = execute_snipe(opportunity, target_price=target, monitor_label=self.asset_label, trade_context=trade_context)
+                            if trade_result:
                                 with _trade_lock:
                                     self.snipe_executed = True
                                 status += "✅ SNIPED!"
-                                cost = int(MAX_POSITION_SIZE / opportunity["price"]) * opportunity["price"]
                                 send_discord_notification(
                                     f"✅ Trade Executed - {self.asset_label}",
-                                    f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Cost:** ~${cost:.2f}\n**Timer:** {total_secs}s\n**Target:** ${target:.2f}",
+                                    f"**Slug:** `{self.slug}`\n**Side:** {opportunity['side']}\n**Price:** ${trade_result['price']:.2f}\n**Shares:** {trade_result['size']}\n**Cost:** ${trade_result['cost']:.2f}\n**Payout if win:** ${trade_result['payout']:.2f}\n**Expected return:** +${trade_result['payout'] - trade_result['cost']:.2f} ({((trade_result['payout'] - trade_result['cost']) / trade_result['cost']) * 100:.0f}%)\n**Timer:** {total_secs}s",
                                     color=0x4ade80,
                                 )
-                            else:
-                                # Failed - set cooldown
-                                self.last_snipe_attempt = time.time()
-                                status += f"❌ Failed (cooldown {self.snipe_cooldown}s)"
-                                if not self._discord_notified:
-                                    self._discord_notified = True
-                                    send_discord_notification(
-                                        f"❌ Trade Failed - {self.asset_label}",
-                                        f"**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Timer:** {total_secs}s\n**Target:** ${target:.2f}\n**Cooldown:** {self.snipe_cooldown}s",
-                                        color=0xef4444,
-                                    )
+                            if not trade_result:
+                                self._retry_count += 1
+                                status += f"❌ Failed (retry #{self._retry_count})"
+                                send_discord_notification(
+                                    f"❌ Trade Failed - {self.asset_label} (attempt #{self._retry_count})",
+                                    f"**Slug:** `{self.slug}`\n**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Timer:** {total_secs}s\n**Retrying immediately...**",
+                                    color=0xef4444,
+                                )
                         finally:
                             self._attempting_snipe = False
                         _update_asset_status(self.asset_label, status)
@@ -569,11 +556,8 @@ class SniperMonitor:
         _update_asset_status(self.asset_label, status)
     
     def get_best_opportunity(self, target_price: float) -> dict | None:
-        """Get best snipe opportunity if price in range."""
+        """Buy any side at >= target price."""
         opportunities = []
-
-        # Use small epsilon to match display rounding (0.9795 displays as $0.98)
-        # Skip if price is 0 (no liquidity) or >= $0.995 (no profit at $1.00)
         epsilon = 0.005
         max_price = 0.995
         if self.up_price > 0 and self.up_price < max_price and self.up_price >= (target_price - epsilon) and self.up_size > 0:
@@ -593,12 +577,11 @@ class SniperMonitor:
                 "price": self.down_price,
                 "size": self.down_size,
             })
-        
+
         if not opportunities:
             return None
-        
         return max(opportunities, key=lambda x: x["price"])
-    
+
     def on_error(self, ws, error):
         """Handle WebSocket errors."""
         _update_asset_status(self.asset_label, f"[{self.asset_label}]".ljust(12) + f"| ❌ WebSocket error: {str(error)[:30]}")
@@ -616,7 +599,8 @@ class SniperMonitor:
         self.warmed_up = False
 
         # Track connections
-        _connected_count += 1
+        with _connected_lock:
+            _connected_count += 1
 
         # Subscribe to market tokens
         subscribe_msg = {
@@ -711,21 +695,22 @@ class SniperMonitor:
             self.ws.close()
 
 
-def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.98, monitor_label: str = None, _retry: bool = False, trade_context: dict = None) -> bool:
-    """Execute snipe trade using WebSocket prices. FOK order ensures full fill or cancel."""
+def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.98, monitor_label: str = None, _retry: bool = False, trade_context: dict = None) -> dict | None:
+    """Execute snipe trade using WebSocket prices. FOK order ensures full fill or cancel.
+    Returns dict with trade details on success, None on failure."""
     global _balance_exhausted
     label = monitor_label or "UNKNOWN"
 
     if not EXECUTE_TRADES:
-        return False
+        return None
 
     if _balance_exhausted:
-        return False
+        return None
 
     # Check liquidity before doing anything
     available = int(opportunity.get("size", 0))
     if available < 1:
-        return False
+        return None
 
     try:
         client = get_trading_client()
@@ -747,12 +732,16 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
             size = available
 
         if size < 1:
-            return False
+            return None
+
+        # Skip if order is too small to be worth it
+        cost = size * price
+        if cost < MIN_ORDER_VALUE:
+            return None
 
         # Check position limit
-        cost = size * price
         if not can_open_position(cost):
-            return False
+            return None
 
         # Create and execute order
         order = OrderArgs(
@@ -778,8 +767,9 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
         # Record position if successful
         if success:
             record_position(monitor_label or "UNKNOWN", opportunity["side"], size, price)
+            return {"price": price, "size": size, "cost": cost, "payout": size}
 
-        return success
+        return None
 
     except Exception as e:
         error_str = str(e)
@@ -797,7 +787,7 @@ def execute_snipe(opportunity: dict, size: int = None, target_price: float = 0.9
                 color=0xff0000,
                 ping_everyone=True,
             )
-        return False
+        return None
 
 
 def monitor_asset(asset: str, interval_minutes: int = 15):
@@ -860,7 +850,7 @@ def monitor_asset(asset: str, interval_minutes: int = 15):
                 _update_asset_status(label, f"[{label}]".ljust(12) + f"| ✅ Found market, connecting...")
 
                 # Start WebSocket monitor (interval_end_unix already calculated above)
-                monitor = SniperMonitor(market, asset_label=label, interval_end_unix=interval_end_unix, asset_name=asset, interval_minutes=interval_minutes)
+                monitor = SniperMonitor(market, asset_label=label, interval_end_unix=interval_end_unix, asset_name=asset, interval_minutes=interval_minutes, slug=current_slug)
                 ws_thread = threading.Thread(target=monitor.run, daemon=True)
                 ws_thread.start()
 
