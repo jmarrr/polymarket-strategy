@@ -541,11 +541,12 @@ class SniperMonitor:
                             if not trade_result:
                                 self._retry_count += 1
                                 status += f"❌ Failed (retry #{self._retry_count})"
-                                send_discord_notification(
-                                    f"❌ Trade Failed - {self.asset_label} (attempt #{self._retry_count})",
-                                    f"**Slug:** `{self.slug}`\n**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Timer:** {total_secs}s\n**Retrying immediately...**",
-                                    color=0xef4444,
-                                )
+                                if self._retry_count == 1:
+                                    send_discord_notification(
+                                        f"❌ Trade Failed - {self.asset_label}",
+                                        f"**Slug:** `{self.slug}`\n**Side:** {opportunity['side']}\n**Price:** ${opportunity['price']:.2f}\n**Timer:** {total_secs}s\n**Retrying...**",
+                                        color=0xef4444,
+                                    )
                         finally:
                             self._attempting_snipe = False
                         _update_asset_status(self.asset_label, status)
