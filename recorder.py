@@ -5,11 +5,10 @@ Records every order book event (snapshots + updates) to CSV files
 for analysis of price movements, liquidity, and spread dynamics.
 
 Usage:
-    python recorder.py                          # defaults: bitcoin, 5m
-    python recorder.py --asset ethereum --interval 15
+    python recorder.py              # interactive market selection
+    python recorder.py --all        # record all markets
 """
 
-import os
 import csv
 import json
 import time
@@ -17,7 +16,7 @@ import argparse
 import threading
 import requests
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from websocket import WebSocketApp
 
@@ -175,7 +174,7 @@ class OrderBookRecorder:
         secs_remaining = max(0, self.interval_end_unix - int(time.time()))
 
         self.csv_writer.writerow([
-            datetime.utcnow().isoformat(timespec="milliseconds"),
+            datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
             event_type, side, book_side, price, size,
             f"{best_up:.4f}" if best_up else "",
             f"{best_down:.4f}" if best_down else "",
@@ -344,14 +343,68 @@ class OrderBookRecorder:
                 time.sleep(5)
 
 
+AVAILABLE_MARKETS = [
+    ("bitcoin", 15),
+    ("ethereum", 15),
+    ("solana", 15),
+    ("bitcoin", 5),
+]
+
+
+def select_market():
+    """Interactive market selection at startup."""
+    print(f"\n{'='*40}")
+    print("  Order Book Recorder")
+    print(f"{'='*40}")
+    print("\n  Available markets:\n")
+    for i, (asset, interval) in enumerate(AVAILABLE_MARKETS, 1):
+        print(f"    {i}) {asset.upper()}-{interval}M")
+    print(f"    {len(AVAILABLE_MARKETS) + 1}) All markets")
+    print()
+
+    while True:
+        try:
+            choice = input("  Select market (1-5): ").strip()
+            num = int(choice)
+            if 1 <= num <= len(AVAILABLE_MARKETS):
+                return [AVAILABLE_MARKETS[num - 1]]
+            elif num == len(AVAILABLE_MARKETS) + 1:
+                return AVAILABLE_MARKETS
+        except (ValueError, EOFError):
+            pass
+        print("  Invalid choice, try again.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Record Polymarket order book data to CSV")
-    parser.add_argument("--asset", default="bitcoin", choices=["bitcoin", "ethereum", "solana", "xrp"])
-    parser.add_argument("--interval", type=int, default=5, choices=[5, 15])
+    parser.add_argument("--all", action="store_true", help="Record all markets")
     args = parser.parse_args()
 
-    recorder = OrderBookRecorder(args.asset, args.interval)
-    recorder.run()
+    if args.all:
+        markets = AVAILABLE_MARKETS
+    else:
+        markets = select_market()
+
+    if len(markets) == 1:
+        asset, interval = markets[0]
+        recorder = OrderBookRecorder(asset, interval)
+        recorder.run()
+    else:
+        # Run multiple recorders in parallel
+        print(f"\n  Recording {len(markets)} markets in parallel...\n")
+        threads = []
+        for asset, interval in markets:
+            recorder = OrderBookRecorder(asset, interval)
+            t = threading.Thread(target=recorder.run, daemon=True)
+            t.start()
+            threads.append(t)
+            time.sleep(0.5)
+
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n\nStopped.")
 
 
 if __name__ == "__main__":
